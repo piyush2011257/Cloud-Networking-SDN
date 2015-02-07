@@ -1,0 +1,275 @@
+--- ./neutron/db/l3_db.py	2014-10-31 13:06:09.000000000 +0530
++++ ./neutron_poc/db/l3_db.py	2014-10-31 13:06:09.000000000 +0530
+@@ -112,6 +112,9 @@
+         return self._fields(res, fields)
+ 
+     def create_router(self, context, router):
++        LOG.debug(_("create_router called in l3_db.py context: %s"),context)
++        LOG.debug(_("create_router called in l3_db.py router: %s"),router)
++
+         r = router['router']
+         has_gw_info = False
+         if EXTERNAL_GW_INFO in r:
+@@ -133,6 +136,10 @@
+         return self._make_router_dict(router_db, process_extensions=False)
+ 
+     def update_router(self, context, id, router):
++        LOG.debug(_("update_router called in l3_db.py context: %s"),context)
++        LOG.debug(_("update_router called in l3_db.py id: %s"),id)
++        LOG.debug(_("update_router called in l3_db.py router: %s"),router)
++
+         r = router['router']
+         has_gw_info = False
+         if EXTERNAL_GW_INFO in r:
+@@ -146,9 +153,15 @@
+             # Ensure we actually have something to update
+             if r.keys():
+                 router_db.update(r)
+-        self.l3_rpc_notifier.routers_updated(
++        LOG.debug(_("update_router called in l3_db.py router_db: %s"),router_db)
++        LOG.debug(_("update_router called in l3_db.py router_db[id]: %s"),router_db['id'])
++        # inform ML2 plugin on creation of router ports
++	self._core_plugin.update_router_interface(context, router_db['id'])
++	'''
++	self.l3_rpc_notifier.routers_updated(
+             context, [router_db['id']])
+-        return self._make_router_dict(router_db)
++        '''
++	return self._make_router_dict(router_db)
+ 
+     def _create_router_gw_port(self, context, router, network_id):
+         # Port has no 'tenant-id', as it is hidden from user
+@@ -175,6 +188,11 @@
+             context.session.add(router)
+ 
+     def _update_router_gw_info(self, context, router_id, info, router=None):
++        LOG.debug(_("update_router_gw_info called in l3_db.py context: %s"),context)
++        LOG.debug(_("update_router_gw_info called in l3_db.py router_id: %s"),router_id)
++        LOG.debug(_("update_router_gw_info called in l3_db.py info: %s"),info)
++        LOG.debug(_("update_router_gw_info called in l3_db.py router: %s"),router)
++
+         # TODO(salvatore-orlando): guarantee atomic behavior also across
+         # operations that span beyond the model classes handled by this
+         # class (e.g.: delete_port)
+@@ -273,22 +291,29 @@
+                                      network_id, subnet_id, subnet_cidr):
+         try:
+             rport_qry = context.session.query(models_v2.Port)
++            LOG.debug(_("check_for_dup_router_subnet called in l3_db.py rport_qry: %s"),rport_qry)
+             rports = rport_qry.filter_by(device_id=router_id)
+-            # It's possible these ports are on the same network, but
+-            # different subnets.
++            LOG.debug(_("check_for_dup_router_subnet called in l3_db.py rports: %s"), rports)
++
++            # It's possible these ports are on the same network, but different subnets.
+             new_ipnet = netaddr.IPNetwork(subnet_cidr)
+             for p in rports:
++                LOG.debug(_("check_for_dup_router_subnet called in l3_db.py p in rports: %s"),p)
+                 for ip in p['fixed_ips']:
++                    LOG.debug(_("check_for_dup_router_subnet called in l3_db.py ip in p: %s"),ip)
+                     if ip['subnet_id'] == subnet_id:
+                         msg = (_("Router already has a port on subnet %s")
+                                % subnet_id)
+                         raise q_exc.BadRequest(resource='router', msg=msg)
+                     sub_id = ip['subnet_id']
++                    LOG.debug(_("check_for_dup_router_subnet called in l3_db.py get_subnet returns: %s"),self._core_plugin._get_subnet(context.elevated(),sub_id))
+                     cidr = self._core_plugin._get_subnet(context.elevated(),
+                                                          sub_id)['cidr']
+                     ipnet = netaddr.IPNetwork(cidr)
+                     match1 = netaddr.all_matching_cidrs(new_ipnet, [cidr])
+                     match2 = netaddr.all_matching_cidrs(ipnet, [subnet_cidr])
++        	    LOG.debug(_("check_for_dup_router_subnet called in l3_db.py match1: %s"), match1)
++	            LOG.debug(_("check_for_dup_router_subnet called in l3_db.py match2: %s"), match2)
+                     if match1 or match2:
+                         data = {'subnet_cidr': subnet_cidr,
+                                 'subnet_id': subnet_id,
+@@ -302,12 +327,17 @@
+             pass
+ 
+     def add_router_interface(self, context, router_id, interface_info):
+-        if not interface_info:
++        LOG.debug(_("add_router_interface called in l3_db.py context: %s"),context)
++        LOG.debug(_("add_router_interface called in l3_db.py router: %s"),router_id)
++        LOG.debug(_("add_router_interface called in l3_db.py interface: %s"),interface_info)
++
++	if not interface_info:
+             msg = _("Either subnet_id or port_id must be specified")
+             raise q_exc.BadRequest(resource='router', msg=msg)
+ 
+         if 'port_id' in interface_info:
+             # make sure port update is committed
++            LOG.debug(_("add_router_interface called in l3_db.py portid given"))
+             with context.session.begin(subtransactions=True):
+                 if 'subnet_id' in interface_info:
+                     msg = _("Cannot specify both subnet-id and port-id")
+@@ -315,6 +345,7 @@
+ 
+                 port = self._core_plugin._get_port(context,
+                                                    interface_info['port_id'])
++	        LOG.debug(_("add_router_interface called in l3_db.py port returned by plugin: %s"),port)
+                 if port['device_id']:
+                     raise q_exc.PortInUse(net_id=port['network_id'],
+                                           port_id=port['id'],
+@@ -325,15 +356,21 @@
+                     raise q_exc.BadRequest(resource='router', msg=msg)
+                 subnet_id = fixed_ips[0]['subnet_id']
+                 subnet = self._core_plugin._get_subnet(context, subnet_id)
++                LOG.debug(_("add_router_interface called in l3_db.py subnet returned by plugin: %s"),subnet)
+                 self._check_for_dup_router_subnet(context, router_id,
+                                                   port['network_id'],
+                                                   subnet['id'],
+                                                   subnet['cidr'])
++                LOG.debug(_("add_router_interface called in l3_db.py port.update going to be called"))
+                 port.update({'device_id': router_id,
+                              'device_owner': DEVICE_OWNER_ROUTER_INTF})
++                LOG.debug(_("add_router_interface called in l3_db.py port.update going to be called over"))
+         elif 'subnet_id' in interface_info:
++            LOG.debug(_("add_router_interface called in l3_db.py subnetid given"))
+             subnet_id = interface_info['subnet_id']
+             subnet = self._core_plugin._get_subnet(context, subnet_id)
++            LOG.debug(_("add_router_interface called in l3_db.py subnet returned by plugin: %s"),subnet)
++
+             # Ensure the subnet has a gateway
+             if not subnet['gateway_ip']:
+                 msg = _('Subnet for router interface must have a gateway IP')
+@@ -354,18 +391,31 @@
+                  'device_id': router_id,
+                  'device_owner': DEVICE_OWNER_ROUTER_INTF,
+                  'name': ''}})
++            LOG.debug(_("add_router_interface called in l3_db.py port returned by plugin: %s"),port)
+ 
+-        self.l3_rpc_notifier.routers_updated(
++        LOG.debug(_("add_router_interface called in l3_db.py router_updated being called context: %s"), context)
++        LOG.debug(_("add_router_interface called in l3_db.py l3_rpc_notifier.update_routers being called"))
++	'''
++	self.l3_rpc_notifier.routers_updated(
+             context, [router_id], 'add_router_interface')
+-        info = {'id': router_id,
++        '''
++	# inform ML2 plugin on creation of router ports
++	self._core_plugin.update_router_interface(context, router_id)
++	info = {'id': router_id,
+                 'tenant_id': subnet['tenant_id'],
+                 'port_id': port['id'],
+                 'subnet_id': port['fixed_ips'][0]['subnet_id']}
+-        notifier_api.notify(context,
++        LOG.debug(_("add_router_interface called in l3_db.py info: %s"), info)
++        LOG.debug(_("add_router_interface called in l3_db.py notify_api called"))
++
++        
++	notifier_api.notify(context,
+                             notifier_api.publisher_id('network'),
+                             'router.interface.create',
+                             notifier_api.CONF.default_notification_level,
+                             {'router.interface': info})
++        
++	LOG.debug(_("add_router_interface called in l3_db.py notify_api called over"))
+         return info
+ 
+     def _confirm_router_interface_not_in_use(self, context, router_id,
+@@ -570,6 +620,11 @@
+         return (fip['port_id'], internal_ip_address, router_id)
+ 
+     def _update_fip_assoc(self, context, fip, floatingip_db, external_port):
++        LOG.debug(_("update_fip_assoc called in l3_db.py context: %s"), context)
++        LOG.debug(_("update_fip_assoc called in l3_db.py fip: %s"), fip)
++        LOG.debug(_("update_fip_assoc called in l3_db.py floatingip_db: %s"), floatingip_db)
++        LOG.debug(_("update_fip_assoc called in l3_db.py external_port: %s"), external_port)
++
+         port_id = internal_ip_address = router_id = None
+         if (('fixed_ip_address' in fip and fip['fixed_ip_address']) and
+             not ('port_id' in fip and fip['port_id'])):
+@@ -597,9 +652,28 @@
+         floatingip_db.update({'fixed_ip_address': internal_ip_address,
+                               'fixed_port_id': port_id,
+                               'router_id': router_id})
++        LOG.debug(_("update_fip_assoc called in l3_db.py internal_ip_address: %s"), internal_ip_address)
++        LOG.debug(_("update_fip_assoc called in l3_db.py port_id: %s"), port_id)
++        LOG.debug(_("update_fip_assoc called in l3_db.py router_id: %s"), router_id)
++
++	
++	
++	# Call update_fip_assoc() in ML2 plugin
++	if fip['port_id'] and internal_ip_address :
++		LOG.debug(_("Floating IP associated with a fixed IP"))
++		fixed_port = self._core_plugin._get_port(context.elevated(), fip['port_id'])
++		LOG.debug(_("update_fip_assoc called fixed_port: %s"), fixed_port)
++		floatingip_port = self._core_plugin._get_port(context.elevated(), floatingip_db['floating_port_id'])
++                LOG.debug(_("update_fip_assoc called floatingip_port: %s"), floatingip_port)
++		self._core_plugin._update_fip_assoc(context, internal_ip_address, floatingip_db['floating_ip_address'], fixed_port['mac_address'], fixed_port['network_id'],
++						    floatingip_port['network_id'] ,router_id, floatingip_port['id'], floatingip_port['mac_address'])
++	
+ 
++	
+     def create_floatingip(self, context, floatingip):
+-        fip = floatingip['floatingip']
++        LOG.debug(_("create_floatingip called in l3_db.py context: %s"), context)
++        LOG.debug(_("create_floatingip called in l3_db.py floatingip: %s"), floatingip)
++	fip = floatingip['floatingip']
+         tenant_id = self._get_tenant_id_for_create(context, fip)
+         fip_id = uuidutils.generate_uuid()
+ 
+@@ -665,10 +739,20 @@
+         router_id = floatingip_db['router_id']
+         if router_id and router_id != before_router_id:
+             router_ids.append(router_id)
+-        if router_ids:
++        
++	'''
++	if router_ids:
+             self.l3_rpc_notifier.routers_updated(
+                 context, router_ids, 'update_floatingip')
+-        return self._make_floatingip_dict(floatingip_db)
++        '''
++	
++        # inform ML2 plugin on creation of router ports
++	if router_ids:
++		for router_id in router_ids:
++			self._core_plugin.update_router_interface(context, router_id)
++				
++	
++	return self._make_floatingip_dict(floatingip_db)
+ 
+     def delete_floatingip(self, context, id):
+         floatingip = self._get_floatingip(context, id)
+@@ -809,11 +893,23 @@
+     def get_sync_interfaces(self, context, router_ids,
+                             device_owner=DEVICE_OWNER_ROUTER_INTF):
+         """Query router interfaces that relate to list of router_ids."""
+-        if not router_ids:
++        LOG.debug(_("get_sync_interfaces called context: %s"), context)
++        LOG.debug(_("get_sync_interfaces called router_ids: %s"), router_ids)
++        LOG.debug(_("get_sync_interfaces called device_owner: %s"), device_owner)
++
++	if not router_ids:
+             return []
+         filters = {'device_id': router_ids,
+                    'device_owner': [device_owner]}
++        LOG.debug(_("get_sync_interfaces called filter: %s"), filters)
++        LOG.debug(_("get_sync_interfaces called filter: %s"), filters.get('device_id'))
++        LOG.debug(_("get_sync_interfaces called filter: %s"), filters.get('device_owner'))
++	
+         interfaces = self._core_plugin.get_ports(context, filters)
++        #interfaces = self._core_plugin.get_ports(context)
++
++        LOG.debug(_("get_sync_interfaces called interfaces: %s"), interfaces)
++
+         if interfaces:
+             self._populate_subnet_for_ports(context, interfaces)
+         return interfaces
+@@ -878,10 +974,15 @@
+     def get_sync_data(self, context, router_ids=None, active=None):
+         """Query routers and their related floating_ips, interfaces."""
+         with context.session.begin(subtransactions=True):
++            LOG.debug(_("get_sync_data called in l3_db.py arguement router_ids: %s"), router_ids)
+             routers = self._get_sync_routers(context,
+                                              router_ids=router_ids,
+                                              active=active)
++	    LOG.debug(_("get_sync_data called in l3_db.py routers: %s"), routers)
+             router_ids = [router['id'] for router in routers]
++            LOG.debug(_("get_sync_data called in l3_db.py router_ids: %s"), router_ids)
+             floating_ips = self._get_sync_floating_ips(context, router_ids)
++            LOG.debug(_("get_sync_data called in l3_db.py called floating_ips: %s"), floating_ips)
+             interfaces = self.get_sync_interfaces(context, router_ids)
++            LOG.debug(_("get_sync_data called in l3_db.py called interfaces: %s"), interfaces)
+         return self._process_sync_data(routers, interfaces, floating_ips)

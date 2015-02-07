@@ -1,0 +1,33 @@
+--- ./neutron/plugins/ml2/rpc.py	2014-10-31 13:06:09.000000000 +0530
++++ ./neutron_poc/plugins/ml2/rpc.py	2014-10-31 13:06:09.000000000 +0530
+@@ -231,3 +231,30 @@
+                                        segmentation_id=segmentation_id,
+                                        physical_network=physical_network),
+                          topic=self.topic_port_update)
++
++    # call _add_snat_router_gateway() function in OVS agent on each host to add SNAT port flows
++    def snat_port_update(self, context, port, network_type, segmentation_id,
++                    physical_network):
++        self.fanout_cast(context,
++                         self.make_msg('_add_snat_router_gateway',
++                                       port=port,
++                                       network_type=network_type,
++                                       segmentation_id=segmentation_id,
++                                       physical_network=physical_network),
++                         topic=self.topic_port_update)
++
++    # call fip_port_update() function in OVS agent on each host to add DNAT port flows
++    def fip_port_update(self, context, fixed_ip, floating_ip, fixed_mac, fixed_network_id, floating_network_id, router_id, floatingip_id, floatingip_mac):
++        self.fanout_cast(context,
++                         self.make_msg('fip_port_update',
++                                       fixed_ip=fixed_ip,
++                                       floating_ip=floating_ip,
++                                       fixed_mac=fixed_mac,
++                                       fixed_network_id=fixed_network_id,
++                                       floating_network_id=floating_network_id,
++                                       router_id=router_id,
++                                       floatingip_id=floatingip_id,
++                                       floatingip_mac=floatingip_mac),
++                         topic=self.topic_port_update)
++
++

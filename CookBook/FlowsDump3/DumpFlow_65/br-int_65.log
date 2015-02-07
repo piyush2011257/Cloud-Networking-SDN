@@ -1,0 +1,65 @@
+NXST_FLOW reply (xid=0x4):
+ cookie=0x0, duration=1341.574s, table=0, n_packets=10, n_bytes=792, idle_age=1302, priority=0 actions=drop
+ cookie=0x0, duration=1311.066s, table=0, n_packets=3, n_bytes=230, idle_age=1303, priority=1,in_port=65 actions=resubmit(,1)
+ cookie=0x0, duration=1301s, table=0, n_packets=3, n_bytes=230, idle_age=1294, priority=1,in_port=68 actions=resubmit(,1)
+ cookie=0x0, duration=1309.036s, table=0, n_packets=2, n_bytes=140, idle_age=1301, priority=1,in_port=66 actions=resubmit(,1)
+ cookie=0x0, duration=1305.069s, table=0, n_packets=4, n_bytes=300, idle_age=1296, priority=1,in_port=67 actions=resubmit(,1)
+ cookie=0x0, duration=1341.721s, table=0, n_packets=1, n_bytes=98, idle_age=1080, priority=1,in_port=64 actions=resubmit(,10)
+ cookie=0x0, duration=1341.423s, table=1, n_packets=0, n_bytes=0, idle_age=1341, priority=0 actions=drop
+ cookie=0x0, duration=1308.881s, table=1, n_packets=2, n_bytes=140, idle_age=1301, priority=1,in_port=66,vlan_tci=0x0000 actions=mod_vlan_vid:2,resubmit(,10)
+ cookie=0x0, duration=1304.914s, table=1, n_packets=4, n_bytes=300, idle_age=1296, priority=1,in_port=67,vlan_tci=0x0000 actions=mod_vlan_vid:4,resubmit(,10)
+ cookie=0x0, duration=1310.905s, table=1, n_packets=3, n_bytes=230, idle_age=1303, priority=1,in_port=65,vlan_tci=0x0000 actions=mod_vlan_vid:1,resubmit(,10)
+ cookie=0x0, duration=1300.851s, table=1, n_packets=3, n_bytes=230, idle_age=1294, priority=1,in_port=68,vlan_tci=0x0000 actions=mod_vlan_vid:3,resubmit(,10)
+ cookie=0x0, duration=1293.118s, table=2, n_packets=0, n_bytes=0, idle_age=1293, priority=1,ip,vlan_tci=0x0005/0x0fff,dl_dst=fa:16:3e:12:58:cb actions=load:0x40->NXM_NX_REG0[],resubmit(,21)
+ cookie=0x0, duration=1288.814s, table=2, n_packets=0, n_bytes=0, idle_age=1288, priority=1,ip,vlan_tci=0x0005/0x0fff,dl_dst=fa:16:3e:ef:fa:e8 actions=load:0x40->NXM_NX_REG0[],resubmit(,21)
+ cookie=0x0, duration=1341.126s, table=2, n_packets=0, n_bytes=0, idle_age=1341, priority=0,dl_dst=01:00:00:00:00:00/01:00:00:00:00:00 actions=resubmit(,21)
+ cookie=0x0, duration=1341.273s, table=2, n_packets=1, n_bytes=98, idle_age=1080, priority=0,dl_dst=00:00:00:00:00:00/01:00:00:00:00:00 actions=resubmit(,20),resubmit(,21)
+ cookie=0x0, duration=1340.237s, table=3, n_packets=1, n_bytes=98, idle_age=1080, priority=0 actions=resubmit(,2)
+ cookie=0x0, duration=1300.224s, table=3, n_packets=0, n_bytes=0, idle_age=1300, priority=1,vlan_tci=0x0003/0x0fff,dl_dst=fa:16:3e:b0:f0:55 actions=resubmit(,30)
+ cookie=0x0, duration=1310.293s, table=3, n_packets=0, n_bytes=0, idle_age=1310, priority=1,vlan_tci=0x0001/0x0fff,dl_dst=fa:16:3e:09:b3:0d actions=resubmit(,30)
+ cookie=0x0, duration=1304.300s, table=3, n_packets=0, n_bytes=0, idle_age=1304, priority=1,vlan_tci=0x0004/0x0fff,dl_dst=fa:16:3e:85:b4:5a actions=resubmit(,30)
+ cookie=0x0, duration=1308.247s, table=3, n_packets=0, n_bytes=0, idle_age=1308, priority=1,vlan_tci=0x0002/0x0fff,dl_dst=fa:16:3e:a8:1a:ba actions=resubmit(,30)
+ cookie=0x0, duration=1340.385s, table=3, n_packets=12, n_bytes=900, idle_age=1294, priority=10,dl_dst=01:00:00:00:00:00/01:00:00:00:00:00 actions=resubmit(,21)
+ cookie=0x0, duration=1340.828s, table=4, n_packets=13, n_bytes=998, idle_age=1080, priority=0 actions=resubmit(,3)
+ cookie=0x0, duration=1292.955s, table=4, n_packets=0, n_bytes=0, idle_age=1292, priority=1,ip,vlan_tci=0x0005/0x0fff,dl_src=fa:16:3e:12:58:cb actions=load:0x1->NXM_NX_REG2[],resubmit(,5)
+ cookie=0x0, duration=1288.663s, table=4, n_packets=0, n_bytes=0, idle_age=1288, priority=1,ip,vlan_tci=0x0005/0x0fff,dl_src=fa:16:3e:ef:fa:e8 actions=load:0x2->NXM_NX_REG2[],resubmit(,5)
+ cookie=0x0, duration=1340.682s, table=5, n_packets=0, n_bytes=0, idle_age=1340, priority=0 actions=drop
+ cookie=0x0, duration=1304.143s, table=5, n_packets=0, n_bytes=0, idle_age=1304, priority=1,ip,reg2=0x2,nw_dst=10.10.1.0/24 actions=mod_dl_src:fa:16:3e:85:b4:5a,mod_vlan_vid:4,resubmit(,3)
+ cookie=0x0, duration=1308.097s, table=5, n_packets=0, n_bytes=0, idle_age=1308, priority=1,ip,reg2=0x1,nw_dst=10.10.2.0/24 actions=mod_dl_src:fa:16:3e:a8:1a:ba,mod_vlan_vid:2,resubmit(,3)
+ cookie=0x0, duration=1300.065s, table=5, n_packets=0, n_bytes=0, idle_age=1300, priority=1,ip,reg2=0x2,nw_dst=10.10.2.0/24 actions=mod_dl_src:fa:16:3e:b0:f0:55,mod_vlan_vid:3,resubmit(,3)
+ cookie=0x0, duration=1310.129s, table=5, n_packets=0, n_bytes=0, idle_age=1310, priority=1,ip,reg2=0x1,nw_dst=10.10.1.0/24 actions=mod_dl_src:fa:16:3e:09:b3:0d,mod_vlan_vid:1,resubmit(,3)
+ cookie=0x0, duration=1340.977s, table=10, n_packets=13, n_bytes=998, idle_age=1080, priority=1 actions=learn(table=20,hard_timeout=300,priority=1,NXM_OF_VLAN_TCI[0..11],NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],load:NXM_OF_IN_PORT[]->NXM_NX_REG0[0..15]),resubmit(,4)
+ cookie=0x0, duration=1308.560s, table=21, n_packets=0, n_bytes=0, idle_age=1308, priority=1,reg0=0x42,vlan_tci=0x0002/0x0fff actions=strip_vlan,output:66
+ cookie=0x0, duration=1308.405s, table=21, n_packets=2, n_bytes=140, idle_age=1301, priority=1,reg0=0,vlan_tci=0x0002/0x0fff actions=output:64,strip_vlan,output:66
+ cookie=0x0, duration=1300.382s, table=21, n_packets=3, n_bytes=230, idle_age=1294, priority=1,reg0=0,vlan_tci=0x0003/0x0fff actions=output:64,strip_vlan,output:68
+ cookie=0x0, duration=1304.611s, table=21, n_packets=0, n_bytes=0, idle_age=1304, priority=1,reg0=0x43,vlan_tci=0x0004/0x0fff actions=strip_vlan,output:67
+ cookie=0x0, duration=1310.445s, table=21, n_packets=3, n_bytes=230, idle_age=1303, priority=1,reg0=0,vlan_tci=0x0001/0x0fff actions=output:64,strip_vlan,output:65
+ cookie=0x0, duration=1310.600s, table=21, n_packets=0, n_bytes=0, idle_age=1310, priority=1,reg0=0x41,vlan_tci=0x0001/0x0fff actions=strip_vlan,output:65
+ cookie=0x0, duration=1300.539s, table=21, n_packets=0, n_bytes=0, idle_age=1300, priority=1,reg0=0x44,vlan_tci=0x0003/0x0fff actions=strip_vlan,output:68
+ cookie=0x0, duration=1304.460s, table=21, n_packets=4, n_bytes=328, idle_age=1080, priority=1,reg0=0,vlan_tci=0x0004/0x0fff actions=output:64,strip_vlan,output:67
+ cookie=0x0, duration=1340.533s, table=21, n_packets=0, n_bytes=0, idle_age=1340, priority=0,reg0=0x40 actions=output:64
+ cookie=0x0, duration=1303.978s, table=30, n_packets=0, n_bytes=0, idle_age=1303, priority=1,ip,vlan_tci=0x0004/0x0fff,nw_src=10.10.1.0/24 actions=load:0x2->NXM_NX_REG1[],resubmit(,35)
+ cookie=0x0, duration=1309.976s, table=30, n_packets=0, n_bytes=0, idle_age=1309, priority=1,ip,vlan_tci=0x0001/0x0fff,nw_src=10.10.1.0/24 actions=load:0x1->NXM_NX_REG1[],resubmit(,35)
+ cookie=0x0, duration=1299.905s, table=30, n_packets=0, n_bytes=0, idle_age=1299, priority=1,ip,vlan_tci=0x0003/0x0fff,nw_src=10.10.2.0/24 actions=load:0x2->NXM_NX_REG1[],resubmit(,35)
+ cookie=0x0, duration=1307.946s, table=30, n_packets=0, n_bytes=0, idle_age=1307, priority=1,ip,vlan_tci=0x0002/0x0fff,nw_src=10.10.2.0/24 actions=load:0x1->NXM_NX_REG1[],resubmit(,35)
+ cookie=0x0, duration=1340.083s, table=30, n_packets=0, n_bytes=0, idle_age=1340, priority=0 actions=drop
+ cookie=0x0, duration=1339.931s, table=35, n_packets=0, n_bytes=0, idle_age=1339, priority=0 actions=resubmit(,50)
+ cookie=0x0, duration=1303.821s, table=35, n_packets=0, n_bytes=0, idle_age=1303, priority=1,ip,reg1=0x2,nw_dst=10.10.1.0/24 actions=strip_vlan,mod_vlan_vid:4,mod_dl_src:fa:16:3e:85:b4:5a,resubmit(,40)
+ cookie=0x0, duration=1307.800s, table=35, n_packets=0, n_bytes=0, idle_age=1307, priority=1,ip,reg1=0x1,nw_dst=10.10.2.0/24 actions=strip_vlan,mod_vlan_vid:2,mod_dl_src:fa:16:3e:a8:1a:ba,resubmit(,40)
+ cookie=0x0, duration=1299.755s, table=35, n_packets=0, n_bytes=0, idle_age=1299, priority=1,ip,reg1=0x2,nw_dst=10.10.2.0/24 actions=strip_vlan,mod_vlan_vid:3,mod_dl_src:fa:16:3e:b0:f0:55,resubmit(,40)
+ cookie=0x0, duration=1309.828s, table=35, n_packets=0, n_bytes=0, idle_age=1309, priority=1,ip,reg1=0x1,nw_dst=10.10.1.0/24 actions=strip_vlan,mod_vlan_vid:1,mod_dl_src:fa:16:3e:09:b3:0d,resubmit(,40)
+ cookie=0x0, duration=1310.455s, table=40, n_packets=0, n_bytes=0, idle_age=1310, priority=1,ip,vlan_tci=0x0001/0x0fff,nw_dst=10.10.1.2 actions=mod_dl_dst:fa:16:3e:9e:3f:91,resubmit(,2)
+ cookie=0x0, duration=1300.695s, table=40, n_packets=0, n_bytes=0, idle_age=1300, hard_age=1299, priority=1,ip,vlan_tci=0x0003/0x0fff,nw_dst=10.10.2.1 actions=drop
+ cookie=0x0, duration=1300.862s, table=40, n_packets=0, n_bytes=0, idle_age=1300, priority=1,ip,vlan_tci=0x0003/0x0fff,nw_dst=10.10.2.3 actions=mod_dl_dst:fa:16:3e:de:ed:12,resubmit(,2)
+ cookie=0x0, duration=1304.758s, table=40, n_packets=0, n_bytes=0, idle_age=1304, hard_age=1303, priority=1,ip,vlan_tci=0x0004/0x0fff,nw_dst=10.10.1.1 actions=drop
+ cookie=0x0, duration=1308.723s, table=40, n_packets=0, n_bytes=0, idle_age=1308, hard_age=1307, priority=1,ip,vlan_tci=0x0002/0x0fff,nw_dst=10.10.2.1 actions=drop
+ cookie=0x0, duration=1308.400s, table=40, n_packets=0, n_bytes=0, idle_age=1308, priority=1,ip,vlan_tci=0x0002/0x0fff,nw_dst=10.10.2.2 actions=mod_dl_dst:fa:16:3e:c3:fb:2a,resubmit(,2)
+ cookie=0x0, duration=1310.752s, table=40, n_packets=0, n_bytes=0, idle_age=1310, hard_age=1309, priority=1,ip,vlan_tci=0x0001/0x0fff,nw_dst=10.10.1.1 actions=drop
+ cookie=0x0, duration=1310.924s, table=40, n_packets=0, n_bytes=0, idle_age=1310, priority=1,ip,vlan_tci=0x0001/0x0fff,nw_dst=10.10.1.3 actions=mod_dl_dst:fa:16:3e:bb:b3:6a,resubmit(,2)
+ cookie=0x0, duration=1308.885s, table=40, n_packets=0, n_bytes=0, idle_age=1308, priority=1,ip,vlan_tci=0x0002/0x0fff,nw_dst=10.10.2.3 actions=mod_dl_dst:fa:16:3e:cd:bc:43,resubmit(,2)
+ cookie=0x0, duration=1304.914s, table=40, n_packets=0, n_bytes=0, idle_age=1304, priority=1,ip,vlan_tci=0x0004/0x0fff,nw_dst=10.10.1.3 actions=mod_dl_dst:fa:16:3e:13:5f:2d,resubmit(,2)
+ cookie=0x0, duration=1300.383s, table=40, n_packets=0, n_bytes=0, idle_age=1300, priority=1,ip,vlan_tci=0x0003/0x0fff,nw_dst=10.10.2.2 actions=mod_dl_dst:fa:16:3e:ce:a9:e9,resubmit(,2)
+ cookie=0x0, duration=1304.456s, table=40, n_packets=0, n_bytes=0, idle_age=1304, priority=1,ip,vlan_tci=0x0004/0x0fff,nw_dst=10.10.1.2 actions=mod_dl_dst:fa:16:3e:50:b9:dd,resubmit(,2)
+ cookie=0x0, duration=1339.781s, table=50, n_packets=0, n_bytes=0, idle_age=1339, priority=0 actions=drop
+ cookie=0x0, duration=1293.279s, table=50, n_packets=0, n_bytes=0, idle_age=1293, priority=1,reg1=0x1 actions=mod_dl_dst:fa:16:3e:12:58:cb,mod_vlan_vid:5,resubmit(,2)
+ cookie=0x0, duration=1288.966s, table=50, n_packets=0, n_bytes=0, idle_age=1288, priority=1,reg1=0x2 actions=mod_dl_dst:fa:16:3e:ef:fa:e8,mod_vlan_vid:5,resubmit(,2)

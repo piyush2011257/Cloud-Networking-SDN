@@ -1,0 +1,3844 @@
+diff -rupN old/neutron/agent/linux/ovs_lib.py new/neutron/agent/linux/ovs_lib.py
+--- old/neutron/agent/linux/ovs_lib.py	2014-10-31 13:06:09.000000000 +0530
++++ new/neutron/agent/linux/ovs_lib.py	2014-10-31 13:06:09.000000000 +0530
+@@ -20,6 +20,9 @@
+ 
+ import re
+ 
++import os
++import commands
++
+ from neutron.agent.linux import ip_lib
+ from neutron.agent.linux import utils
+ from neutron.openstack.common import jsonutils
+@@ -137,15 +140,28 @@ class OVSBridge:
+                    kwargs['dl_type'] or '')
+         dl_vlan = ('dl_vlan' in kwargs and ",dl_vlan=%s" %
+                    kwargs['dl_vlan'] or '')
+-        dl_src = 'dl_src' in kwargs and ",dl_src=%s" % kwargs['dl_src'] or ''
++
++        vlan_tci= ('vlan_tci' in kwargs and ",vlan_tci=%s" %
++                   kwargs['vlan_tci'] or '')
++
++	dl_src = 'dl_src' in kwargs and ",dl_src=%s" % kwargs['dl_src'] or ''
+         dl_dst = 'dl_dst' in kwargs and ",dl_dst=%s" % kwargs['dl_dst'] or ''
+         nw_src = 'nw_src' in kwargs and ",nw_src=%s" % kwargs['nw_src'] or ''
+         nw_dst = 'nw_dst' in kwargs and ",nw_dst=%s" % kwargs['nw_dst'] or ''
+         tun_id = 'tun_id' in kwargs and ",tun_id=%s" % kwargs['tun_id'] or ''
++        # Add support for NXM_NX_REG0[], REG1[], REG2[]
++	reg0 = 'reg0' in kwargs and ",reg0=%s" % kwargs['reg0'] or ''
++        reg1 = 'reg1' in kwargs and ",reg1=%s" % kwargs['reg1'] or ''
++        reg2 = 'reg2' in kwargs and ",reg2=%s" % kwargs['reg2'] or ''
++
+         proto = 'proto' in kwargs and ",%s" % kwargs['proto'] or ''
++        
++        nw_proto = 'nw_proto' in kwargs and ",nw_proto=%s" % kwargs['nw_proto'] or ''
++	
++	tun_id = 'tun_id' in kwargs and ",tun_id=%s" % kwargs['tun_id'] or ''
+         ip = ('nw_src' in kwargs or 'nw_dst' in kwargs) and ',ip' or ''
+-        match = (table + in_port + dl_type + dl_vlan + dl_src + dl_dst +
+-                (proto or ip) + nw_src + nw_dst + tun_id)
++        match = (table + in_port + dl_type + dl_vlan + vlan_tci + reg0 + reg1 + reg2 + dl_src + dl_dst +
++                (proto or ip ) + nw_proto + nw_src + nw_dst + tun_id)
+         if match:
+             match = match[1:]  # strip leading comma
+             flow_expr_arr.append(match)
+@@ -157,17 +173,28 @@ class OVSBridge:
+         if "priority" not in kwargs:
+             kwargs["priority"] = "0"
+ 
++        LOG.debug(_('add_or_mod_flow_str received %s'),kwargs)
+         flow_expr_arr = self._build_flow_expr_arr(**kwargs)
++        LOG.debug(_('flow_expr_arr  %s'),flow_expr_arr)
+         flow_expr_arr.append("actions=%s" % (kwargs["actions"]))
+         flow_str = ",".join(flow_expr_arr)
+         return flow_str
+ 
+     def add_flow(self, **kwargs):
++        LOG.debug(_('add_flow received %s'),kwargs)
+         flow_str = self.add_or_mod_flow_str(**kwargs)
+-        if self.defer_apply_flows:
+-            self.deferred_flows['add'] += flow_str + '\n'
++        '''
++	if self.defer_apply_flows:
++            LOG.debug(_("Defer apply executed not ofctl run"))
++	    self.deferred_flows['add'] += flow_str + '\n'
+         else:
+-            self.run_ofctl("add-flow", [flow_str])
++            LOG.debug(_("Running ofctl command"))
++	    self.run_ofctl("add-flow", [flow_str])
++	'''
++        # remove deffered flows concept. Not handled by POC currently. Directly add flow on call
++	LOG.debug(_("Running ofctl command"))
++        self.run_ofctl("add-flow", [flow_str])
++
+ 
+     def mod_flow(self, **kwargs):
+         flow_str = self.add_or_mod_flow_str(**kwargs)
+@@ -185,6 +212,7 @@ class OVSBridge:
+         if self.defer_apply_flows:
+             self.deferred_flows['del'] += flow_str + '\n'
+         else:
++
+             self.run_ofctl("del-flows", [flow_str])
+ 
+     def defer_apply_on(self):
+@@ -335,6 +363,7 @@ class OVSBridge:
+             LOG.info(_("Unable to parse regex results. Exception: %s"), e)
+             return
+ 
++    
+     def delete_ports(self, all_ports=False):
+         if all_ports:
+             port_names = self.get_port_name_list()
+diff -rupN old/neutron/db/l3_db.py new/neutron/db/l3_db.py
+--- old/neutron/db/l3_db.py	2014-10-31 13:06:09.000000000 +0530
++++ new/neutron/db/l3_db.py	2014-10-31 13:06:09.000000000 +0530
+@@ -112,6 +112,9 @@ class L3_NAT_db_mixin(l3.RouterPluginBas
+         return self._fields(res, fields)
+ 
+     def create_router(self, context, router):
++        LOG.debug(_("create_router called in l3_db.py context: %s"),context)
++        LOG.debug(_("create_router called in l3_db.py router: %s"),router)
++
+         r = router['router']
+         has_gw_info = False
+         if EXTERNAL_GW_INFO in r:
+@@ -133,6 +136,10 @@ class L3_NAT_db_mixin(l3.RouterPluginBas
+         return self._make_router_dict(router_db, process_extensions=False)
+ 
+     def update_router(self, context, id, router):
++        LOG.debug(_("update_router called in l3_db.py context: %s"),context)
++        LOG.debug(_("update_router called in l3_db.py id: %s"),id)
++        LOG.debug(_("update_router called in l3_db.py router: %s"),router)
++
+         r = router['router']
+         has_gw_info = False
+         if EXTERNAL_GW_INFO in r:
+@@ -146,9 +153,15 @@ class L3_NAT_db_mixin(l3.RouterPluginBas
+             # Ensure we actually have something to update
+             if r.keys():
+                 router_db.update(r)
+-        self.l3_rpc_notifier.routers_updated(
++        LOG.debug(_("update_router called in l3_db.py router_db: %s"),router_db)
++        LOG.debug(_("update_router called in l3_db.py router_db[id]: %s"),router_db['id'])
++        # inform ML2 plugin on creation of router ports
++	self._core_plugin.update_router_interface(context, router_db['id'])
++	'''
++	self.l3_rpc_notifier.routers_updated(
+             context, [router_db['id']])
+-        return self._make_router_dict(router_db)
++        '''
++	return self._make_router_dict(router_db)
+ 
+     def _create_router_gw_port(self, context, router, network_id):
+         # Port has no 'tenant-id', as it is hidden from user
+@@ -175,6 +188,11 @@ class L3_NAT_db_mixin(l3.RouterPluginBas
+             context.session.add(router)
+ 
+     def _update_router_gw_info(self, context, router_id, info, router=None):
++        LOG.debug(_("update_router_gw_info called in l3_db.py context: %s"),context)
++        LOG.debug(_("update_router_gw_info called in l3_db.py router_id: %s"),router_id)
++        LOG.debug(_("update_router_gw_info called in l3_db.py info: %s"),info)
++        LOG.debug(_("update_router_gw_info called in l3_db.py router: %s"),router)
++
+         # TODO(salvatore-orlando): guarantee atomic behavior also across
+         # operations that span beyond the model classes handled by this
+         # class (e.g.: delete_port)
+@@ -273,22 +291,29 @@ class L3_NAT_db_mixin(l3.RouterPluginBas
+                                      network_id, subnet_id, subnet_cidr):
+         try:
+             rport_qry = context.session.query(models_v2.Port)
++            LOG.debug(_("check_for_dup_router_subnet called in l3_db.py rport_qry: %s"),rport_qry)
+             rports = rport_qry.filter_by(device_id=router_id)
+-            # It's possible these ports are on the same network, but
+-            # different subnets.
++            LOG.debug(_("check_for_dup_router_subnet called in l3_db.py rports: %s"), rports)
++
++            # It's possible these ports are on the same network, but different subnets.
+             new_ipnet = netaddr.IPNetwork(subnet_cidr)
+             for p in rports:
++                LOG.debug(_("check_for_dup_router_subnet called in l3_db.py p in rports: %s"),p)
+                 for ip in p['fixed_ips']:
++                    LOG.debug(_("check_for_dup_router_subnet called in l3_db.py ip in p: %s"),ip)
+                     if ip['subnet_id'] == subnet_id:
+                         msg = (_("Router already has a port on subnet %s")
+                                % subnet_id)
+                         raise q_exc.BadRequest(resource='router', msg=msg)
+                     sub_id = ip['subnet_id']
++                    LOG.debug(_("check_for_dup_router_subnet called in l3_db.py get_subnet returns: %s"),self._core_plugin._get_subnet(context.elevated(),sub_id))
+                     cidr = self._core_plugin._get_subnet(context.elevated(),
+                                                          sub_id)['cidr']
+                     ipnet = netaddr.IPNetwork(cidr)
+                     match1 = netaddr.all_matching_cidrs(new_ipnet, [cidr])
+                     match2 = netaddr.all_matching_cidrs(ipnet, [subnet_cidr])
++        	    LOG.debug(_("check_for_dup_router_subnet called in l3_db.py match1: %s"), match1)
++	            LOG.debug(_("check_for_dup_router_subnet called in l3_db.py match2: %s"), match2)
+                     if match1 or match2:
+                         data = {'subnet_cidr': subnet_cidr,
+                                 'subnet_id': subnet_id,
+@@ -302,12 +327,17 @@ class L3_NAT_db_mixin(l3.RouterPluginBas
+             pass
+ 
+     def add_router_interface(self, context, router_id, interface_info):
+-        if not interface_info:
++        LOG.debug(_("add_router_interface called in l3_db.py context: %s"),context)
++        LOG.debug(_("add_router_interface called in l3_db.py router: %s"),router_id)
++        LOG.debug(_("add_router_interface called in l3_db.py interface: %s"),interface_info)
++
++	if not interface_info:
+             msg = _("Either subnet_id or port_id must be specified")
+             raise q_exc.BadRequest(resource='router', msg=msg)
+ 
+         if 'port_id' in interface_info:
+             # make sure port update is committed
++            LOG.debug(_("add_router_interface called in l3_db.py portid given"))
+             with context.session.begin(subtransactions=True):
+                 if 'subnet_id' in interface_info:
+                     msg = _("Cannot specify both subnet-id and port-id")
+@@ -315,6 +345,7 @@ class L3_NAT_db_mixin(l3.RouterPluginBas
+ 
+                 port = self._core_plugin._get_port(context,
+                                                    interface_info['port_id'])
++	        LOG.debug(_("add_router_interface called in l3_db.py port returned by plugin: %s"),port)
+                 if port['device_id']:
+                     raise q_exc.PortInUse(net_id=port['network_id'],
+                                           port_id=port['id'],
+@@ -325,15 +356,21 @@ class L3_NAT_db_mixin(l3.RouterPluginBas
+                     raise q_exc.BadRequest(resource='router', msg=msg)
+                 subnet_id = fixed_ips[0]['subnet_id']
+                 subnet = self._core_plugin._get_subnet(context, subnet_id)
++                LOG.debug(_("add_router_interface called in l3_db.py subnet returned by plugin: %s"),subnet)
+                 self._check_for_dup_router_subnet(context, router_id,
+                                                   port['network_id'],
+                                                   subnet['id'],
+                                                   subnet['cidr'])
++                LOG.debug(_("add_router_interface called in l3_db.py port.update going to be called"))
+                 port.update({'device_id': router_id,
+                              'device_owner': DEVICE_OWNER_ROUTER_INTF})
++                LOG.debug(_("add_router_interface called in l3_db.py port.update going to be called over"))
+         elif 'subnet_id' in interface_info:
++            LOG.debug(_("add_router_interface called in l3_db.py subnetid given"))
+             subnet_id = interface_info['subnet_id']
+             subnet = self._core_plugin._get_subnet(context, subnet_id)
++            LOG.debug(_("add_router_interface called in l3_db.py subnet returned by plugin: %s"),subnet)
++
+             # Ensure the subnet has a gateway
+             if not subnet['gateway_ip']:
+                 msg = _('Subnet for router interface must have a gateway IP')
+@@ -354,18 +391,31 @@ class L3_NAT_db_mixin(l3.RouterPluginBas
+                  'device_id': router_id,
+                  'device_owner': DEVICE_OWNER_ROUTER_INTF,
+                  'name': ''}})
++            LOG.debug(_("add_router_interface called in l3_db.py port returned by plugin: %s"),port)
+ 
+-        self.l3_rpc_notifier.routers_updated(
++        LOG.debug(_("add_router_interface called in l3_db.py router_updated being called context: %s"), context)
++        LOG.debug(_("add_router_interface called in l3_db.py l3_rpc_notifier.update_routers being called"))
++	'''
++	self.l3_rpc_notifier.routers_updated(
+             context, [router_id], 'add_router_interface')
+-        info = {'id': router_id,
++        '''
++	# inform ML2 plugin on creation of router ports
++	self._core_plugin.update_router_interface(context, router_id)
++	info = {'id': router_id,
+                 'tenant_id': subnet['tenant_id'],
+                 'port_id': port['id'],
+                 'subnet_id': port['fixed_ips'][0]['subnet_id']}
+-        notifier_api.notify(context,
++        LOG.debug(_("add_router_interface called in l3_db.py info: %s"), info)
++        LOG.debug(_("add_router_interface called in l3_db.py notify_api called"))
++
++        
++	notifier_api.notify(context,
+                             notifier_api.publisher_id('network'),
+                             'router.interface.create',
+                             notifier_api.CONF.default_notification_level,
+                             {'router.interface': info})
++        
++	LOG.debug(_("add_router_interface called in l3_db.py notify_api called over"))
+         return info
+ 
+     def _confirm_router_interface_not_in_use(self, context, router_id,
+@@ -570,6 +620,11 @@ class L3_NAT_db_mixin(l3.RouterPluginBas
+         return (fip['port_id'], internal_ip_address, router_id)
+ 
+     def _update_fip_assoc(self, context, fip, floatingip_db, external_port):
++        LOG.debug(_("update_fip_assoc called in l3_db.py context: %s"), context)
++        LOG.debug(_("update_fip_assoc called in l3_db.py fip: %s"), fip)
++        LOG.debug(_("update_fip_assoc called in l3_db.py floatingip_db: %s"), floatingip_db)
++        LOG.debug(_("update_fip_assoc called in l3_db.py external_port: %s"), external_port)
++
+         port_id = internal_ip_address = router_id = None
+         if (('fixed_ip_address' in fip and fip['fixed_ip_address']) and
+             not ('port_id' in fip and fip['port_id'])):
+@@ -597,9 +652,28 @@ class L3_NAT_db_mixin(l3.RouterPluginBas
+         floatingip_db.update({'fixed_ip_address': internal_ip_address,
+                               'fixed_port_id': port_id,
+                               'router_id': router_id})
++        LOG.debug(_("update_fip_assoc called in l3_db.py internal_ip_address: %s"), internal_ip_address)
++        LOG.debug(_("update_fip_assoc called in l3_db.py port_id: %s"), port_id)
++        LOG.debug(_("update_fip_assoc called in l3_db.py router_id: %s"), router_id)
++
++	
++	
++	# Call update_fip_assoc() in ML2 plugin
++	if fip['port_id'] and internal_ip_address :
++		LOG.debug(_("Floating IP associated with a fixed IP"))
++		fixed_port = self._core_plugin._get_port(context.elevated(), fip['port_id'])
++		LOG.debug(_("update_fip_assoc called fixed_port: %s"), fixed_port)
++		floatingip_port = self._core_plugin._get_port(context.elevated(), floatingip_db['floating_port_id'])
++                LOG.debug(_("update_fip_assoc called floatingip_port: %s"), floatingip_port)
++		self._core_plugin._update_fip_assoc(context, internal_ip_address, floatingip_db['floating_ip_address'], fixed_port['mac_address'], fixed_port['network_id'],
++						    floatingip_port['network_id'] ,router_id, floatingip_port['id'], floatingip_port['mac_address'])
++	
+ 
++	
+     def create_floatingip(self, context, floatingip):
+-        fip = floatingip['floatingip']
++        LOG.debug(_("create_floatingip called in l3_db.py context: %s"), context)
++        LOG.debug(_("create_floatingip called in l3_db.py floatingip: %s"), floatingip)
++	fip = floatingip['floatingip']
+         tenant_id = self._get_tenant_id_for_create(context, fip)
+         fip_id = uuidutils.generate_uuid()
+ 
+@@ -665,10 +739,20 @@ class L3_NAT_db_mixin(l3.RouterPluginBas
+         router_id = floatingip_db['router_id']
+         if router_id and router_id != before_router_id:
+             router_ids.append(router_id)
+-        if router_ids:
++        
++	'''
++	if router_ids:
+             self.l3_rpc_notifier.routers_updated(
+                 context, router_ids, 'update_floatingip')
+-        return self._make_floatingip_dict(floatingip_db)
++        '''
++	
++        # inform ML2 plugin on creation of router ports
++	if router_ids:
++		for router_id in router_ids:
++			self._core_plugin.update_router_interface(context, router_id)
++				
++	
++	return self._make_floatingip_dict(floatingip_db)
+ 
+     def delete_floatingip(self, context, id):
+         floatingip = self._get_floatingip(context, id)
+@@ -809,11 +893,23 @@ class L3_NAT_db_mixin(l3.RouterPluginBas
+     def get_sync_interfaces(self, context, router_ids,
+                             device_owner=DEVICE_OWNER_ROUTER_INTF):
+         """Query router interfaces that relate to list of router_ids."""
+-        if not router_ids:
++        LOG.debug(_("get_sync_interfaces called context: %s"), context)
++        LOG.debug(_("get_sync_interfaces called router_ids: %s"), router_ids)
++        LOG.debug(_("get_sync_interfaces called device_owner: %s"), device_owner)
++
++	if not router_ids:
+             return []
+         filters = {'device_id': router_ids,
+                    'device_owner': [device_owner]}
++        LOG.debug(_("get_sync_interfaces called filter: %s"), filters)
++        LOG.debug(_("get_sync_interfaces called filter: %s"), filters.get('device_id'))
++        LOG.debug(_("get_sync_interfaces called filter: %s"), filters.get('device_owner'))
++	
+         interfaces = self._core_plugin.get_ports(context, filters)
++        #interfaces = self._core_plugin.get_ports(context)
++
++        LOG.debug(_("get_sync_interfaces called interfaces: %s"), interfaces)
++
+         if interfaces:
+             self._populate_subnet_for_ports(context, interfaces)
+         return interfaces
+@@ -878,10 +974,15 @@ class L3_NAT_db_mixin(l3.RouterPluginBas
+     def get_sync_data(self, context, router_ids=None, active=None):
+         """Query routers and their related floating_ips, interfaces."""
+         with context.session.begin(subtransactions=True):
++            LOG.debug(_("get_sync_data called in l3_db.py arguement router_ids: %s"), router_ids)
+             routers = self._get_sync_routers(context,
+                                              router_ids=router_ids,
+                                              active=active)
++	    LOG.debug(_("get_sync_data called in l3_db.py routers: %s"), routers)
+             router_ids = [router['id'] for router in routers]
++            LOG.debug(_("get_sync_data called in l3_db.py router_ids: %s"), router_ids)
+             floating_ips = self._get_sync_floating_ips(context, router_ids)
++            LOG.debug(_("get_sync_data called in l3_db.py called floating_ips: %s"), floating_ips)
+             interfaces = self.get_sync_interfaces(context, router_ids)
++            LOG.debug(_("get_sync_data called in l3_db.py called interfaces: %s"), interfaces)
+         return self._process_sync_data(routers, interfaces, floating_ips)
+diff -rupN old/neutron/interface.py new/neutron/interface.py
+--- old/neutron/interface.py	1970-01-01 05:30:00.000000000 +0530
++++ new/neutron/interface.py	2014-10-31 13:06:09.000000000 +0530
+@@ -0,0 +1,126 @@
++# vim: tabstop=4 shiftwidth=4 softtabstop=4
++
++# Copyright 2012 OpenStack Foundation
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++
++import abc
++
++import netaddr
++
++from neutron.agent.linux import ip_lib
++from neutron.agent.linux import ovs_lib
++from neutron.agent.linux import utils
++from neutron.common import exceptions
++from neutron.extensions.flavor import (FLAVOR_NETWORK)
++from neutron.openstack.common import importutils
++from neutron.openstack.common import log as logging
++
++
++LOG = logging.getLogger(__name__)
++
++
++class LinuxInterfaceDriver(object):
++    __metaclass__ = abc.ABCMeta
++
++    # from linux IF_NAMESIZE
++    DEV_NAME_LEN = 14
++    DEV_NAME_PREFIX = 'tap'
++
++    def __init__(self, conf):
++        self.conf = conf
++        self.root_helper = config.get_root_helper(conf)
++
++    def init_l3(self, device_name, ip_cidrs, namespace=None):
++        """Set the L3 settings for the interface using data from the port.
++        ip_cidrs: list of 'X.X.X.X/YY' strings
++        """
++        LOG.debug(_("init_l3 called device_name: %s"), device_name)
++        LOG.debug(_("init_l3 called ip_cidrs"), ip_cidrs)
++        device = ip_lib.IPDevice(device_name, self.root_helper, namespace=namespace)
++
++        LOG.debug(_("init_l3 called device: %s"), device)
++        previous = {}
++        for address in device.addr.list(scope='global', filters=['permanent']):
++            previous[address['cidr']] = address['ip_version']
++
++        LOG.debug(_("init_l3 called previous: %s"), previous)
++        # add new addresses
++        for ip_cidr in ip_cidrs:
++
++            net = netaddr.IPNetwork(ip_cidr)
++            if ip_cidr in previous:
++                del previous[ip_cidr]
++                continue
++
++            LOG.debug(_("init_l3 called ip_cidr: %s"), ip_cidr)
++            device.addr.add(net.version, ip_cidr, str(net.broadcast))
++
++        # clean up any old addresses
++        for ip_cidr, ip_version in previous.items():
++            device.addr.delete(ip_version, ip_cidr)
++
++    def check_bridge_exists(self, bridge):
++        if not ip_lib.device_exists(bridge):
++            raise exceptions.BridgeDoesNotExist(bridge=bridge)
++
++    def get_device_name(self, port):
++        return (self.DEV_NAME_PREFIX + port.id)[:self.DEV_NAME_LEN]
++
++    @abc.abstractmethod
++    def plug(self, network_id, port_id, device_name, mac_address,
++             bridge=None, namespace=None, prefix=None):
++        """Plug in the interface."""
++
++
++
++class OVSInterfaceDriver(LinuxInterfaceDriver):
++    """Driver for creating an internal interface on an OVS bridge."""
++
++    DEV_NAME_PREFIX = 'tap'
++
++    def __init__(self, conf):
++        super(OVSInterfaceDriver, self).__init__(conf)
++
++    def _get_tap_name(self, dev_name, prefix=None):
++        return dev_name
++
++    def _ovs_add_port(self, bridge, device_name, port_id, mac_address, internal=True):
++        cmd = ['ovs-vsctl', '--', '--if-exists', 'del-port', device_name, '--', 'add-port', bridge, device_name]
++        if internal:
++            cmd += ['--', 'set', 'Interface', device_name, 'type=internal']
++        cmd += ['--', 'set', 'Interface', device_name,
++                'external-ids:iface-id=%s' % port_id,
++                '--', 'set', 'Interface', device_name,
++                'external-ids:iface-status=active',
++                '--', 'set', 'Interface', device_name,
++                'external-ids:attached-mac=%s' % mac_address]
++        utils.execute(cmd, self.root_helper)
++
++    def plug(self, network_id, port_id, device_name, mac_address, bridge=None,  prefix=None):
++        """Plug in the interface."""
++        if not bridge:
++		bridge = "br-int"
++	self.check_bridge_exists(bridge)
++        if not ip_lib.device_exists(device_name, self.root_helper):
++
++            ip = ip_lib.IPWrapper(self.root_helper)
++            tap_name = self._get_tap_name(device_name, prefix)
++            ns_dev = ip.device(device_name)
++            self._ovs_add_port(bridge, tap_name, port_id, mac_address, internal=True)
++            ns_dev.link.set_address(mac_address)
++            ns_dev.link.set_up()
++        else:
++            LOG.warn(_("Device %s already exists"), device_name)
++
+diff -rupN old/neutron/plugins/ml2/drivers/l2pop/db.py new/neutron/plugins/ml2/drivers/l2pop/db.py
+--- old/neutron/plugins/ml2/drivers/l2pop/db.py	2014-10-31 13:06:09.000000000 +0530
++++ new/neutron/plugins/ml2/drivers/l2pop/db.py	2014-10-31 13:06:09.000000000 +0530
+@@ -75,3 +75,10 @@ class L2populationDbMixin(base_db.Common
+             query = query.filter(models_v2.Port.network_id == network_id,
+                                  ml2_models.PortBinding.host == agent_host)
+             return query.count()
++
++    def get_subnet_address(self, session, subnet_id):
++        with session.begin(subtransactions=True):
++            query = session.query(models_v2.Subnet)
++            query = query.filter(models_v2.Subnet.id == subnet_id)
++            return query.first()
++
+diff -rupN old/neutron/plugins/ml2/drivers/l2pop/mech_driver.py new/neutron/plugins/ml2/drivers/l2pop/mech_driver.py
+--- old/neutron/plugins/ml2/drivers/l2pop/mech_driver.py	2014-10-31 13:06:09.000000000 +0530
++++ new/neutron/plugins/ml2/drivers/l2pop/mech_driver.py	2014-10-31 13:06:09.000000000 +0530
+@@ -91,6 +91,7 @@ class L2populationMechanismDriver(api.Me
+     def update_port_postcommit(self, context):
+         port = context.current
+         orig = context.original
++        LOG.debug(_("update_port_postcommit called context: %s"), context)
+ 
+         if port['status'] == orig['status']:
+             self._fixed_ips_changed(context, orig, port)
+@@ -100,6 +101,8 @@ class L2populationMechanismDriver(api.Me
+             fdb_entries = self._update_port_down(context)
+             l2pop_rpc.L2populationAgentNotify.remove_fdb_entries(
+                 self.rpc_ctx, fdb_entries)
++        LOG.debug(_("update_port_postcommit called over"))
++
+ 
+     def _get_port_infos(self, context, port):
+         agent_host = port['binding:host_id']
+@@ -132,8 +135,24 @@ class L2populationMechanismDriver(api.Me
+ 
+         return agent, agent_ip, segment, fdb_entries
+ 
++    def _get_physical_network_context_detail ( self, network_segment_context ):
++	return network_segment_context['provider:physical_network']
++
++    def _get_port_subnet_entries ( self, port ):
++         return [ip['subnet_id'] for ip in port['fixed_ips']]
++
+     def _update_port_up(self, context):
+-        port_context = context.current
++        LOG.debug(_("Context for Port Up update %s"),context)
++        LOG.debug(_("Current Context for Port Up update %s"),context.current)
++        LOG.debug(_("Network Context for Port Up update %s"),context.network)
++        LOG.debug(_("Network Context Object representation in detail %s"),context.network.current)
++	LOG.debug(_("Network Context Object representation in detail %s"),context.network.network_segments)
++	LOG.debug(_("Network Context Object representation in detail %s"),context.network.original)
++        network_segment_context=context.network.current
++	is_external=context.network.current['router:external']
++	phys_net= self._get_physical_network_context_detail(network_segment_context)
++        LOG.debug(_("Physical Network %s"), phys_net)
++	port_context = context.current
+         port_infos = self._get_port_infos(context, port_context)
+         if not port_infos:
+             return
+@@ -142,13 +161,39 @@ class L2populationMechanismDriver(api.Me
+         agent_host = port_context['binding:host_id']
+         network_id = port_context['network_id']
+ 
++	subnet_id = self._get_port_subnet_entries(port_context)
++	port_uid= context.current['id']
++	device_owner= port_context['device_owner']
++	device_id= port_context['device_id']
++        LOG.debug(_("New Port Context entries %s"), port_uid)
++        LOG.debug(_("New Port Context entries %s"), device_id)
++        LOG.debug(_("New Port Context entries %s"), device_owner)
++	for val in subnet_id:
++		LOG.debug(_("New Port Context entries %s"), val)
++
++
++
+         session = db_api.get_session()
+         agent_ports = self.get_agent_network_port_count(session, agent_host,
+                                                         network_id)
+-
++        
++	subnet_cidr=[]
++	for val in subnet_id:
++		subnet_query = self.get_subnet_address(session, val)
++	        subnet_cidr.append(subnet_query['cidr'])
++		LOG.debug(_("Subnet Query result %s"), subnet_query)
++        for val in subnet_cidr:
++                LOG.debug(_("Subnet CIDR list %s"), val)
++	
+         other_fdb_entries = {network_id:
+-                             {'segment_id': segment['segmentation_id'],
++                             {'port_id' : port_uid,
++			      'device_owner' : device_owner,
++			      'device_id' : device_id,
++			      'subnet_cidr' : subnet_cidr,
++			      'physical_network' : phys_net,
++			      'segment_id': segment['segmentation_id'],
+                               'network_type': segment['network_type'],
++			      'router:external': is_external,
+                               'ports': {agent_ip: []}}}
+ 
+         if agent_ports == 1 or (
+@@ -156,13 +201,16 @@ class L2populationMechanismDriver(api.Me
+             # First port plugged on current agent in this network,
+             # we have to provide it with the whole list of fdb entries
+             agent_fdb_entries = {network_id:
+-                                 {'segment_id': segment['segmentation_id'],
++                                 {'physical_network' : phys_net,
++				  'segment_id': segment['segmentation_id'],
+                                   'network_type': segment['network_type'],
++				  'router:external' : is_external,
+                                   'ports': {}}}
+             ports = agent_fdb_entries[network_id]['ports']
+ 
+             network_ports = self.get_network_ports(session, network_id)
+             for network_port in network_ports:
++	        LOG.debug(_("Network Query Result in detail: %s"), network_port)
+                 binding, agent = network_port
+                 if agent.host == agent_host:
+                     continue
+diff -rupN old/neutron/plugins/ml2/plugin.py new/neutron/plugins/ml2/plugin.py
+--- old/neutron/plugins/ml2/plugin.py	2014-10-31 13:06:09.000000000 +0530
++++ new/neutron/plugins/ml2/plugin.py	2014-10-31 14:22:41.000000000 +0530
+@@ -51,6 +51,39 @@ from neutron.plugins.ml2 import managers
+ from neutron.plugins.ml2 import models
+ from neutron.plugins.ml2 import rpc
+ 
++
++'''
++#from neutron.api.rpc.agentnotifiers import l3_rpc_agent_api
++#from neutron.common import constants as q_const
++#Above already imported from another name. so make changes in L3 code below accordingly
++from neutron.common import rpc as q_rpc
++#from neutron.common import topics
++from neutron.db import api as qdbapi
++#from neutron.db import db_base_plugin_v2
++from neutron.db import extraroute_db
++from neutron.db import l3_agentschedulers_db
++from neutron.db import l3_gwmode_db
++from neutron.db import l3_rpc_base
++from neutron.db import model_base
++#from neutron.openstack.common import importutils
++#from neutron.openstack.common import rpc
++#Above already imported from another name. so make changes in L3 code below accordingly
++#from neutron.plugins.common import constants
++#Above already imported from another name. so make changes in L3 code below accordingly
++'''
++
++
++FLOATING_IP_CIDR_SUFFIX = '/32'
++INTERNAL_DEV_PREFIX = 'qr-'
++EXTERNAL_DEV_PREFIX = 'qg-'
++from neutron.agent.linux import ip_lib
++#from oslo.config import cfg
++from neutron.agent.common import config
++from neutron import interface
++from neutron.db import l3_rpc_base
++from neutron.openstack.common.rpc import common as rpc_common
++import netaddr
++
+ LOG = log.getLogger(__name__)
+ 
+ # REVISIT(rkukura): Move this and other network_type constants to
+@@ -63,8 +96,18 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+                 sg_db_rpc.SecurityGroupServerRpcMixin,
+                 agentschedulers_db.DhcpAgentSchedulerDbMixin,
+                 addr_pair_db.AllowedAddressPairsMixin,
+-                extradhcpopt_db.ExtraDhcpOptMixin):
++                extradhcpopt_db.ExtraDhcpOptMixin,
++
++		interface.OVSInterfaceDriver):
+ 
++    '''
++		extraroute_db.ExtraRoute_db_mixin,
++                l3_gwmode_db.L3_NAT_db_mixin,
++                l3_agentschedulers_db.L3AgentSchedulerDbMixin,
++	
++
++						):
++    '''
+     """Implement the Neutron L2 abstractions using modules.
+ 
+     Ml2Plugin is a Neutron plugin based on separately extensible sets
+@@ -82,12 +125,23 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+     __native_sorting_support = True
+ 
+     # List of supported extensions
++ 
++    
+     _supported_extension_aliases = ["provider", "external-net", "binding",
+                                     "quotas", "security-group", "agent",
+                                     "dhcp_agent_scheduler",
+                                     "multi-provider", "allowed-address-pairs",
+                                     "extra_dhcp_opt"]
+-
++    '''
++    _supported_extension_aliases = ["provider", "external-net", "router",
++                                    "ext-gw-mode", "binding", "quotas",
++                                    "security-group", "agent", "extraroute",
++                                    "l3_agent_scheduler",
++                                    "dhcp_agent_scheduler",
++                                    "extra_dhcp_opt",
++                                    "allowed-address-pairs",
++				    "multi-provider"]
++    '''
+     @property
+     def supported_extension_aliases(self):
+         if not hasattr(self, '_aliases'):
+@@ -97,7 +151,8 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+         return self._aliases
+ 
+     def __init__(self):
+-        # First load drivers, then initialize DB, then initialize drivers
++        LOG.info(_("init called"))
++	# First load drivers, then initialize DB, then initialize drivers
+         self.type_manager = managers.TypeManager()
+         self.mechanism_manager = managers.MechanismManager()
+         db.initialize()
+@@ -111,6 +166,13 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+             cfg.CONF.network_scheduler_driver
+         )
+ 
++
++        self.conf = cfg.CONF
++        self.root_helper = "sudo neutron-rootwrap /etc/neutron/rootwrap.conf"
++	self.router_info = {}
++        #self.router_namespace="neutron_router_namespace"                           # Common namespace for SNAT / DNAT Ports
++        #self.snat_dnat_namespace="neutron_snat_dnat_namespace"
++
+         LOG.info(_("Modular L2 Plugin initialization complete"))
+ 
+     def _setup_rpc(self):
+@@ -127,6 +189,8 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+         self.conn.consume_in_thread()
+ 
+     def _process_provider_segment(self, segment):
++        LOG.info(_("process_provider_segment called"))
++        LOG.info(_("process_provider_segment called segment: %s"), segment)
+         network_type = self._get_attribute(segment, provider.NETWORK_TYPE)
+         physical_network = self._get_attribute(segment,
+                                                provider.PHYSICAL_NETWORK)
+@@ -144,6 +208,8 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+         raise exc.InvalidInput(error_message=msg)
+ 
+     def _process_provider_create(self, network):
++        LOG.info(_("process_provider_create called"))
++        LOG.info(_("process_provider_create called network: %s"), network)
+         segments = []
+ 
+         if any(attributes.is_attr_set(network.get(f))
+@@ -170,12 +236,17 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+         return [self._process_provider_segment(s) for s in segments]
+ 
+     def _get_attribute(self, attrs, key):
++        LOG.info(_("get_attributes called attrs: %s"), attrs)
++        LOG.info(_("get_attributes called key: %s"), key)
+         value = attrs.get(key)
+         if value is attributes.ATTR_NOT_SPECIFIED:
+             value = None
+         return value
+ 
+     def _extend_network_dict_provider(self, context, network):
++        LOG.info(_("extend_network_dict_provider called"))
++        LOG.info(_("extend_network_dict_provider called network: %s"), network)
++        LOG.info(_("extend_network_dict_provider called context: %s"), context)
+         id = network['id']
+         segments = db.get_network_segments(context.session, id)
+         if not segments:
+@@ -194,43 +265,63 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+             network[provider.NETWORK_TYPE] = segment[api.NETWORK_TYPE]
+             network[provider.PHYSICAL_NETWORK] = segment[api.PHYSICAL_NETWORK]
+             network[provider.SEGMENTATION_ID] = segment[api.SEGMENTATION_ID]
++        LOG.info(_("extend_network_dict_provider called over"))
+ 
+     def _filter_nets_provider(self, context, nets, filters):
+         # TODO(rkukura): Implement filtering.
+         return nets
+ 
+     def _process_port_binding(self, mech_context, attrs):
++        LOG.debug(_(" process_port_binding_called"))
++        LOG.debug(_(" process_port_binding_called mech_context: %s"), mech_context)
++        LOG.debug(_(" process_port_binding_called attrs: %s"), attrs)
++
+         binding = mech_context._binding
+         port = mech_context.current
++        LOG.debug(_(" process_port_binding_called binding: %s"), binding)
++        LOG.debug(_(" process_port_binding_called port: %s"),port)
++
+         self._update_port_dict_binding(port, binding)
+ 
+         host = attrs and attrs.get(portbindings.HOST_ID)
+         host_set = attributes.is_attr_set(host)
+ 
+         if binding.vif_type != portbindings.VIF_TYPE_UNBOUND:
++            LOG.debug(_(" binding.vif_type is not unbounded"))
+             if (not host_set and binding.segment and
+                 self.mechanism_manager.validate_port_binding(mech_context)):
+                 return False
++            LOG.debug(_(" mechanism_manager.unbind_port being called in db_base_plugin_v2"))
+             self.mechanism_manager.unbind_port(mech_context)
+             self._update_port_dict_binding(port, binding)
+ 
+         if host_set:
++            LOG.debug(_("process_port_binding called host_set is True"))
+             binding.host = host
+             port[portbindings.HOST_ID] = host
+ 
+         if binding.host:
++            LOG.debug(_(" process_port_binding clled binding.host not empty"))
+             self.mechanism_manager.bind_port(mech_context)
+             self._update_port_dict_binding(port, binding)
+ 
++        LOG.debug(_(" process_port_binding_called over"))
++
+         return True
+ 
+     def _update_port_dict_binding(self, port, binding):
++        LOG.info(_("update_port_disct_binding called"))
+         port[portbindings.HOST_ID] = binding.host
+         port[portbindings.VIF_TYPE] = binding.vif_type
+         port[portbindings.CAPABILITIES] = {
+             portbindings.CAP_PORT_FILTER: binding.cap_port_filter}
++        LOG.info(_("update_port_disct_binding called host_id: %s"),binding.host)
++        LOG.info(_("update_port_disct_binding called vif_type: %s"),binding.vif_type)
++        LOG.info(_("update_port_disct_binding called over"))
++
+ 
+     def _delete_port_binding(self, mech_context):
++        LOG.info(_("delete_port_binding called"))
+         binding = mech_context._binding
+         port = mech_context.current
+         self._update_port_dict_binding(port, binding)
+@@ -238,9 +329,14 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+         self._update_port_dict_binding(port, binding)
+ 
+     def _ml2_extend_port_dict_binding(self, port_res, port_db):
++        LOG.info(_("_ml2_exten_port_dict called"))
++        LOG.info(_("_ml2_exten_port_dict called port_res: %s"), port_res)
++        LOG.info(_("_ml2_exten_port_dict called port_db: %s"),port_db)
+         # None when called during unit tests for other plugins.
+         if port_db.port_binding:
+             self._update_port_dict_binding(port_res, port_db.port_binding)
++        LOG.info(_("_ml2_exten_port_dict called over"))
++
+ 
+     db_base_plugin_v2.NeutronDbPluginV2.register_dict_extend_funcs(
+         attributes.PORTS, ['_ml2_extend_port_dict_binding'])
+@@ -251,12 +347,19 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+     # plugins.
+ 
+     def _ml2_port_model_hook(self, context, original_model, query):
++        LOG.info(_("ml2_port_model_hook called"))
+         query = query.outerjoin(models.PortBinding,
+                                 (original_model.id ==
+                                  models.PortBinding.port_id))
++        LOG.info(_("ml2_port_model_hook called context: %s"), context)
++        LOG.info(_("ml2_port_model_hook called original: %s"), original_model)
++        LOG.info(_("ml2_port_model_hook called query: %s"), query)
+         return query
+ 
+     def _ml2_port_result_filter_hook(self, query, filters):
++        LOG.info(_("ml2_port_result_filter_hook called"))
++        LOG.info(_("ml2_port_result_filter_hook called query: %s"), query)
++        LOG.info(_("ml2_port_result_filter_hook called filters: %s"),filters)
+         values = filters and filters.get(portbindings.HOST_ID, [])
+         if not values:
+             return query
+@@ -270,6 +373,7 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+         '_ml2_port_result_filter_hook')
+ 
+     def _notify_port_updated(self, mech_context):
++        LOG.info(_("notify_port_update called"))
+         port = mech_context._port
+         segment = mech_context.bound_segment
+         if not segment:
+@@ -280,14 +384,37 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+                         {'port_id': port['id'],
+                          'network_id': network['id']})
+             return
++
++        nw= mech_context.network
++	LOG.debug(_("Notify_port_update segment context: %s"), segment)
++        LOG.debug(_("Notify_port_update port context: %s"), port)
++        LOG.debug(_("Notify_port_update network.current context: %s"), nw.current)
++        LOG.debug(_("Notify_port_update network.network_segment context: %s"), nw.network_segments)
++
++	
++
+         self.notifier.port_update(mech_context._plugin_context, port,
+                                   segment[api.NETWORK_TYPE],
+                                   segment[api.SEGMENTATION_ID],
+                                   segment[api.PHYSICAL_NETWORK])
+ 
++	
++	
++	
++	if port['device_owner'] == "network:router_gateway":
++		
++		self.notifier.snat_port_update(mech_context._plugin_context, port,
++                                  		segment[api.NETWORK_TYPE],
++                                  		segment[api.SEGMENTATION_ID],
++                                  		segment[api.PHYSICAL_NETWORK])
++	
++
+     # TODO(apech): Need to override bulk operations
+ 
+     def create_network(self, context, network):
++        LOG.info(_("create_network called"))
++        LOG.info(_("create_network called context: %s"), context)
++        LOG.info(_("create_network called network: %s"), network)
+         net_data = network['network']
+         segments = self._process_provider_create(net_data)
+         tenant_id = self._get_tenant_id_for_create(context, net_data)
+@@ -323,6 +450,7 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+         return result
+ 
+     def update_network(self, context, id, network):
++        LOG.debug(_( "update_network called"))
+         provider._raise_if_updates_provider_attributes(network['network'])
+ 
+         session = context.session
+@@ -347,21 +475,27 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+         return updated_network
+ 
+     def get_network(self, context, id, fields=None):
++        LOG.info(_("get_network called network_id: %s"), id)
++        LOG.info(_("get_network called context: %s"), context)
+         session = context.session
+         with session.begin(subtransactions=True):
+             result = super(Ml2Plugin, self).get_network(context, id, None)
++	    LOG.info(_("get_network called result: %s"), result)
+             self._extend_network_dict_provider(context, result)
+ 
++        LOG.info(_("get_network called over"))
+         return self._fields(result, fields)
+ 
+     def get_networks(self, context, filters=None, fields=None,
+                      sorts=None, limit=None, marker=None, page_reverse=False):
++        LOG.info(_("get_networks called"))
+         session = context.session
+         with session.begin(subtransactions=True):
+             nets = super(Ml2Plugin,
+                          self).get_networks(context, filters, None, sorts,
+                                             limit, marker, page_reverse)
+             for net in nets:
++                LOG.info(_("individual network called returner: %s"), net)
+                 self._extend_network_dict_provider(context, net)
+ 
+             nets = self._filter_nets_provider(context, nets, filters)
+@@ -377,7 +511,7 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+         # drivers from being called. This approach should be revisited
+         # when the API layer is reworked during icehouse.
+ 
+-        LOG.debug(_("Deleting network %s"), id)
++        LOG.debug(_("Deleting network %s called"), id)
+         session = context.session
+         while True:
+             try:
+@@ -456,6 +590,7 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+         self.notifier.network_delete(context, id)
+ 
+     def create_subnet(self, context, subnet):
++        LOG.info(_("create_subnet called"))
+         session = context.session
+         with session.begin(subtransactions=True):
+             result = super(Ml2Plugin, self).create_subnet(context, subnet)
+@@ -472,6 +607,7 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+         return result
+ 
+     def update_subnet(self, context, id, subnet):
++        LOG.info(_("update_subnet called"))
+         session = context.session
+         with session.begin(subtransactions=True):
+             original_subnet = super(Ml2Plugin, self).get_subnet(context, id)
+@@ -496,7 +632,7 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+         # approach should be revisited when the API layer is reworked
+         # during icehouse.
+ 
+-        LOG.debug(_("Deleting subnet %s"), id)
++        LOG.debug(_("Deleting subnet %s called"), id)
+         session = context.session
+         while True:
+             with session.begin(subtransactions=True):
+@@ -546,6 +682,15 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+             LOG.error(_("mechanism_manager.delete_subnet_postcommit failed"))
+ 
+     def create_port(self, context, port):
++        LOG.debug(_(" create_port called with context: %s"),context)
++        LOG.debug(_(" create_port called with context roles: %s"),context.roles)
++        LOG.debug(_(" create_port called with context session: %s"),context.session)
++        LOG.debug(_(" create_port called with context is_admin: %s"),context.is_admin)
++        LOG.debug(_(" create_port called with context project_id: %s"),context.project_id)
++        LOG.debug(_(" create_port called with context tenant_id: %s"),context.tenant_id)
++        LOG.debug(_(" create_port called with context: %s"),context.user_id)
++        LOG.debug(_(" create_port called with port: %s"),port)
++
+         attrs = port['port']
+         attrs['status'] = const.PORT_STATUS_DOWN
+ 
+@@ -555,10 +700,23 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+             sgids = self._get_security_groups_on_port(context, port)
+             dhcp_opts = port['port'].get(edo_ext.EXTRADHCPOPTS, [])
+             result = super(Ml2Plugin, self).create_port(context, port)
++            LOG.debug(_(" create_port called result: %s"),result)
+             self._process_port_create_security_group(context, result, sgids)
+             network = self.get_network(context, result['network_id'])
++            LOG.debug(_(" create_port called network: %s"),network)
+             mech_context = driver_context.PortContext(self, context, result,
+                                                       network)
++
++
++
++            LOG.debug(_(" create_port called mech_context: %s"),mech_context)
++            LOG.debug(_(" create_port called mech_context.network.current: %s"),mech_context.network.current)
++            LOG.debug(_(" create_port called mech_context.network.original: %s"),mech_context.network.original)
++            LOG.debug(_(" create_port called mech_context.network_segments: %s"),mech_context.network.network_segments)
++            LOG.debug(_(" create_port called mech_context.current: %s"),mech_context.current)
++            LOG.debug(_(" create_port called mech_context.bound_segment: %s"),mech_context.bound_segment)
++
++
+             self._process_port_binding(mech_context, attrs)
+             result[addr_pair.ADDRESS_PAIRS] = (
+                 self._process_create_allowed_address_pairs(
+@@ -566,8 +724,11 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+                     attrs.get(addr_pair.ADDRESS_PAIRS)))
+             self._process_port_create_extra_dhcp_opts(context, result,
+                                                       dhcp_opts)
++	    LOG.debug(_(" mechanism_manager called for create_port_precommit"))
+             self.mechanism_manager.create_port_precommit(mech_context)
+ 
++
++        LOG.debug(_(" mechanism_manager called for create_port_postcommit"))
+         try:
+             self.mechanism_manager.create_port_postcommit(mech_context)
+         except ml2_exc.MechanismDriverError:
+@@ -576,9 +737,42 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+                             "failed, deleting port '%s'"), result['id'])
+                 self.delete_port(context, result['id'])
+         self.notify_security_groups_member_updated(context, result)
+-        return result
++        
++        LOG.debug(_(" TEST1 called"))
++        LOG.debug(_(" context.current: %s"),mech_context.current)
++        LOG.debug(_(" context.original: %s"),mech_context.original)
++        # LATER IDENTIFY THIS ONLY FOR THE ROUTER-INTERFACES PORTS
++        #self.mechanism_manager.update_port_precommit(mech_context)
++	#self.mechanism_manager.update_port_postcommit(mech_context)
++        LOG.debug(_(" TEST1 called over"))
++
++        LOG.debug(_(" create_port called over"))
++	
++	
++	'''
++	if result['device_owner'] == "network:router_interface":
++		port_id=result['id']
++        	mac_address=result['mac_address']
++                network_id=result['network_id']
++        	self.internal_network_added_modified(network_id, port_id, mac_address)
++
++        	self.update_port(context, result['id'], {'port': {"binding:host_id": "rhel65-rack1"}})
++	'''
++	'''
++	if mech_driver._binding.vif_type == "unbound":
++		port={'port': {'binding:host_id': u'rhel65-rack1'}}
++		id= mech_context.current['id']
++		self.update_port(mech_context, id, port)
++	
++	'''
++	#port_id=mech_context.current['id']
++	#self.update_port_status(context,port_id,"ACTIVE")
++	return result
+ 
+     def update_port(self, context, id, port):
++        LOG.debug(_(" update_port called with port: %s"),port)
++        LOG.debug(_(" update_port called with id: %s"),id)
++        LOG.debug(_(" update_port called with context: %s"),context)
+         attrs = port['port']
+         need_port_update_notify = False
+ 
+@@ -623,11 +817,17 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+ 
+         if need_port_update_notify:
+             self._notify_port_updated(mech_context)
++	    ''' 
++	    Important call.. notify_port_updated -> /neutron/plugins/ml2/rpc.py
++	    The above function calls port_update function from plugin -> agent
++	    On OVS Agent port_update received. In agent, in port_update() it calls update_device_up() from agent -> plugin
++	    device_update_up() in rpc.py calls plugin.port_bound_to_host and update_port_status
++	    '''
+ 
+         return updated_port
+ 
+     def delete_port(self, context, id, l3_port_check=True):
+-        LOG.debug(_("Deleting port %s"), id)
++        LOG.debug(_("Deleting port called %s"), id)
+         l3plugin = manager.NeutronManager.get_service_plugins().get(
+             service_constants.L3_ROUTER_NAT)
+         if l3plugin and l3_port_check:
+@@ -657,10 +857,20 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+         self.notify_security_groups_member_updated(context, port)
+ 
+     def update_port_status(self, context, port_id, status):
++        LOG.info(_("update_port_status called"))
+         updated = False
++        
++        '''
++	if mech_driver._binding.vif_type == "unbound":
++                port={'port': {'binding:host_id': u'rhel65-rack1'}}
++                id= mech_context.current['id']
++                self.update_port(mech_context, id, port)
++	'''
+         session = context.session
+         with session.begin(subtransactions=True):
+             port = db.get_port(session, port_id)
++	    LOG.debug(_("update_port_status called port: %s"),port)
++            LOG.debug(_("update_port_status called status: %s"),status)
+             if not port:
+                 LOG.warning(_("Port %(port)s updated up by agent not found"),
+                             {'port': port_id})
+@@ -668,20 +878,247 @@ class Ml2Plugin(db_base_plugin_v2.Neutro
+             if port.status != status:
+                 original_port = self._make_port_dict(port)
+                 port.status = status
++                LOG.debug(_("update_port_status called original_port: %s"),original_port)
+                 updated_port = self._make_port_dict(port)
++                LOG.debug(_("update_port_status called updated_port: %s"),updated_port)
+                 network = self.get_network(context,
+                                            original_port['network_id'])
+-                mech_context = driver_context.PortContext(
++                LOG.debug(_("update_port_status called network: %s"),network)
++                # Update MechContext detail- Creates an object of PortContext having the needed details
++		mech_context = driver_context.PortContext(
+                     self, context, updated_port, network,
+                     original_port=original_port)
++        	LOG.debug(_(" update_port_status called with context original: %s"),mech_context.original)
++	        LOG.debug(_(" update_port_status called with context curent: %s"),mech_context.current)
++        	LOG.debug(_(" update_port_status called with context network: %s"),mech_context.network)
++        	LOG.debug(_(" update_port_status called with context binding: %s"),mech_context._binding)
+                 self.mechanism_manager.update_port_precommit(mech_context)
+                 updated = True
+ 
+         if updated:
+             self.mechanism_manager.update_port_postcommit(mech_context)
+ 
++        LOG.info(_("update_port_status called over"))
++
+         return True
+ 
+     def port_bound_to_host(self, port_id, host):
++        LOG.info(_("port_bound_to_host called"))
+         port_host = db.get_port_binding_host(port_id)
++        LOG.info(_("port_bound_to_host called over"))
+         return (port_host == host)
++
++
++    def internal_network_added_modified(self, network_id, port_id, mac_address):
++        LOG.debug(_(" L3 internal network added called"))
++        
++	'''
++	try:
++		self.driver = importutils.import_object("neutron.agent.linux.interface.OVSInterfaceDriver", self.conf)
++	except Exception:
++            msg = _("Error importing interface driver "
++                    "'%s'") % self.conf.interface_driver
++            LOG.error(msg)
++            raise SystemExit(msg)
++
++        '''
++	interface_name = self.get_internal_device_name(port_id)
++	if not ip_lib.device_exists(interface_name, root_helper=self.root_helper):
++            self.plug(network_id, port_id, interface_name, mac_address)			# issue of root_helper
++
++
++    def get_internal_device_name(self, port_id):
++        return (INTERNAL_DEV_PREFIX + port_id)[:self.DEV_NAME_LEN]
++
++    def get_external_device_name(self, port_id):
++        return (EXTERNAL_DEV_PREFIX + port_id)[:self.DEV_NAME_LEN]
++
++
++    def update_router_interface(self, context, router_id):
++    	LOG.debug(_("update_router_interface called context: %s"), context)
++        LOG.debug(_("update_router_interface called router_id: %s"), router_id)
++
++	#router = super(L3RouterPlugin, self).sync_routers(context,"rhel65-rack1",router_id)
++     	self.l3_rpc_base_obj = l3_rpc_base.L3RpcCallbackMixin()
++	router = self.l3_rpc_base_obj.sync_routers(context, host='rhel65-30', router_ids=[router_id] )
++	LOG.debug(_("router FLAG1: %s"), router)
++	self._process_router(context, router)
++
++ 
++    def process_routers(self, ri):
++	LOG.debug(_("process_router called ri: %s"), ri)
++	ex_gw_port = self._get_ex_gw_port(ri)
++        internal_ports = ri.router.get('_interfaces')                                                   # get 'interfaces' / all ports from ri.router
++        existing_port_ids = set([p['id'] for p in ri.internal_ports])                                                   # already existing ports
++        if internal_ports:
++		current_port_ids = set([p['id'] for p in internal_ports
++					if p['admin_state_up']]) 
++	else:
++		current_port_ids= set()
++        if internal_ports:
++        	new_ports = [p for p in internal_ports if
++                	     p['id'] in current_port_ids and
++                     	     p['id'] not in existing_port_ids]
++	else:
++		new_ports = []
++
++        if ri.internal_ports:
++		old_ports = [p for p in ri.internal_ports if
++                	    p['id'] not in current_port_ids]
++	else:
++		old_ports = []
++        
++	for p in new_ports:
++                self._set_subnet_info(p)
++                ri.internal_ports.append(p)
++                self.internal_network_added(ri, p['network_id'], p['id'], p['ip_cidr'], p['mac_address'])
++	
++
++	internal_cidrs = [p['ip_cidr'] for p in ri.internal_ports]
++        ex_gw_port_id = (ex_gw_port and ex_gw_port['id'] or ri.ex_gw_port and ri.ex_gw_port['id'])
++        interface_name = None
++        if ex_gw_port_id:
++            interface_name = self.get_external_device_name(ex_gw_port_id)
++        if ex_gw_port and not ri.ex_gw_port:
++            self._set_subnet_info(ex_gw_port)
++            self.external_gateway_added(ri, ex_gw_port, interface_name, internal_cidrs)
++
++        if ex_gw_port:
++            self.process_router_floating_ips(ri, ex_gw_port)
++
++    
++    def process_router_floating_ips(self, ri, ex_gw_port):
++        """Configure the router's floating IPs
++        Configures floating ips in iptables and on the router's gateway device.
++
++        Cleans up floating ips that should not longer be configured.
++        """
++	LOG.debug(_("process_router_floating_ips called ri: %s"), ri)
++	LOG.debug(_("process_router_floating_ips called ex_gw_port: %s"), ex_gw_port)
++        interface_name = self.get_external_device_name(ex_gw_port['id'])
++        device = ip_lib.IPDevice(interface_name, self.root_helper)
++
++        existing_cidrs = set([addr['cidr'] for addr in device.addr.list()])
++        new_cidrs = set()
++
++        # Loop once to ensure that floating ips are configured.
++        for fip in ri.router.get(const.FLOATINGIP_KEY, []):
++            fip_ip = fip['floating_ip_address']
++            ip_cidr = str(fip_ip) + FLOATING_IP_CIDR_SUFFIX
++
++            new_cidrs.add(ip_cidr)
++
++            if ip_cidr not in existing_cidrs:
++                net = netaddr.IPNetwork(ip_cidr)
++                device.addr.add(net.version, ip_cidr, str(net.broadcast))
++
++    def _process_router(self, context, router ):
++	if not ip_lib.device_exists("br-ex"):
++        	LOG.error(_("The external network bridge '%s' does not exist"), "br-ex")
++                return
++
++        router=router[0]
++        LOG.debug(_("router in _process_router called: %s"), router)
++	#target_ex_net_id = self._fetch_external_net_id(context)
++        if not router['admin_state_up']:
++        	return
++
++        #ex_net_id = (router['external_gateway_info'] or {}).get('network_id')
++        '''
++	All networks handled by common agent
++	if ex_net_id and ex_net_id != target_ex_net_id:					# This agent does not manage this external network!
++        	return
++        '''
++	if router['id'] not in self.router_info:
++        	ri = RouterInfo(router['id'], self.root_helper, router)
++		self.router_info[router['id']] = ri
++		#self._router_added(router['id'], router)
++        ri = self.router_info[router['id']]
++        ri.router = router
++	self.process_routers(ri)
++
++
++    def _fetch_external_net_id(self, context):
++        LOG.debug(_(" L3 fetch external id called"))
++        """Find UUID of single external network for this agent."""              # Remeber 1 external network per L3 Agent
++        try:
++        	return self.get_external_network_id(context)               # else ask plugin for the external_netwokr_id
++        except rpc_common.RemoteError as e:
++        	if e.exc_type == 'TooManyExternalNetworks':
++                	msg = _("The 'gateway_external_network_id' option must be configured for this agent as Neutron has more than one external network.")
++                raise Exception(msg)
++
++    def _get_ex_gw_port(self, ri):
++        return ri.router.get('gw_port')
++
++    def _set_subnet_info(self, port):
++    	LOG.debug(_(" L3 set_subnet_info called"))
++        ips = port['fixed_ips']
++        if not ips:
++        	raise Exception(_("Router port %s has no IP address") % port['id'])
++        if len(ips) > 1:
++        	LOG.error(_("Ignoring multiple IPs on router port %s"), port['id'])
++        prefixlen = netaddr.IPNetwork(port['subnet']['cidr']).prefixlen
++        port['ip_cidr'] = "%s/%s" % (ips[0]['ip_address'], prefixlen)
++        # 'ip_cidr': u'10.10.1.1/24 NOTE ip_cidr NOT subnet_cidr
++
++    def internal_network_added(self, ri, network_id, port_id, internal_cidr, mac_address):
++    	LOG.debug(_(" L3 internal network added called"))
++	interface_name = self.get_internal_device_name(port_id)
++	'''
++	try:
++                self.driver = importutils.import_object("neutron.agent.linux.interface.OVSInterfaceDriver", self.conf)
++        except Exception:
++            msg = _("Error importing interface driver")
++            LOG.error(msg)
++            raise SystemExit(msg)
++	'''
++        if not ip_lib.device_exists(interface_name, root_helper=self.root_helper):
++	        LOG.debug(_(" driver.plug called"))
++        	self.plug( network_id, port_id, interface_name, mac_address, prefix=INTERNAL_DEV_PREFIX)
++
++        self.init_l3(interface_name, [internal_cidr] )
++
++
++    def external_gateway_added(self, ri, ex_gw_port, interface_name, internal_cidrs):
++        LOG.debug(_(" external_gateway_added called"))
++        if not ip_lib.device_exists(interface_name, root_helper=self.root_helper):
++            self.plug( ex_gw_port['network_id'], ex_gw_port['id'], interface_name, ex_gw_port['mac_address'], bridge="br-ex", prefix=EXTERNAL_DEV_PREFIX)
++        self.init_l3(interface_name, [ex_gw_port['ip_cidr']])
++
++
++    def _update_fip_assoc(self, context, fixed_ip, floating_ip, fixed_mac, fixed_network_id, floating_network_id, router_id, floatingip_id, floatingip_mac):
++	self.notifier.fip_port_update(context, fixed_ip, floating_ip, fixed_mac, fixed_network_id, floating_network_id, router_id, floatingip_id, floatingip_mac)
++
++	
++class RouterInfo(object):
++
++    def __init__(self, router_id, root_helper, router):
++        LOG.debug(_("RouterInfo class init called"))
++	self.router_id = router_id
++        self.ex_gw_port = None
++        self.internal_ports = []
++        self.root_helper = root_helper
++        self._router = router
++
++        self.routes = []
++
++    @property
++    def router(self):
++        return self._router
++
++    @router.setter
++    def router(self, value):
++        self._router = value
++        if not self._router:
++            return
++        # enable_snat by default if it wasn't specified by plugin
++        self._snat_enabled = self._router.get('enable_snat', True)
++        # Set a SNAT action for the router
++        if self._router.get('gw_port'):
++            self._snat_action = ('add_rules' if self._snat_enabled
++                                 else 'remove_rules')
++        elif self.ex_gw_port:
++            # Gateway port was removed, remove rules
++            self._snat_action = 'remove_rules'
++
+diff -rupN old/neutron/plugins/ml2/plugin.py~ new/neutron/plugins/ml2/plugin.py~
+--- old/neutron/plugins/ml2/plugin.py~	1970-01-01 05:30:00.000000000 +0530
++++ new/neutron/plugins/ml2/plugin.py~	2014-10-31 13:06:09.000000000 +0530
+@@ -0,0 +1,1030 @@
++# Copyright (c) 2013 OpenStack Foundation
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++
++from oslo.config import cfg
++from sqlalchemy import exc as sql_exc
++
++from neutron.agent import securitygroups_rpc as sg_rpc
++from neutron.api.rpc.agentnotifiers import dhcp_rpc_agent_api
++from neutron.api.v2 import attributes
++from neutron.common import constants as const
++from neutron.common import exceptions as exc
++from neutron.common import topics
++from neutron.db import agentschedulers_db
++from neutron.db import allowedaddresspairs_db as addr_pair_db
++from neutron.db import db_base_plugin_v2
++from neutron.db import external_net_db
++from neutron.db import extradhcpopt_db
++from neutron.db import models_v2
++from neutron.db import quota_db  # noqa
++from neutron.db import securitygroups_rpc_base as sg_db_rpc
++from neutron.extensions import allowedaddresspairs as addr_pair
++from neutron.extensions import extra_dhcp_opt as edo_ext
++from neutron.extensions import multiprovidernet as mpnet
++from neutron.extensions import portbindings
++from neutron.extensions import providernet as provider
++from neutron import manager
++from neutron.openstack.common import db as os_db
++from neutron.openstack.common import excutils
++from neutron.openstack.common import importutils
++from neutron.openstack.common import log
++from neutron.openstack.common import rpc as c_rpc
++from neutron.plugins.common import constants as service_constants
++from neutron.plugins.ml2.common import exceptions as ml2_exc
++from neutron.plugins.ml2 import config  # noqa
++from neutron.plugins.ml2 import db
++from neutron.plugins.ml2 import driver_api as api
++from neutron.plugins.ml2 import driver_context
++from neutron.plugins.ml2 import managers
++from neutron.plugins.ml2 import models
++from neutron.plugins.ml2 import rpc
++
++
++FLOATING_IP_CIDR_SUFFIX = '/32'
++INTERNAL_DEV_PREFIX = 'qr-'
++EXTERNAL_DEV_PREFIX = 'qg-'
++from neutron.agent.linux import ip_lib
++#from oslo.config import cfg
++from neutron.agent.common import config
++from neutron import interface
++from neutron.db import l3_rpc_base
++from neutron.openstack.common.rpc import common as rpc_common
++import netaddr
++
++LOG = log.getLogger(__name__)
++
++# REVISIT(rkukura): Move this and other network_type constants to
++# providernet.py?
++TYPE_MULTI_SEGMENT = 'multi-segment'
++
++
++class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
++                external_net_db.External_net_db_mixin,
++                sg_db_rpc.SecurityGroupServerRpcMixin,
++                agentschedulers_db.DhcpAgentSchedulerDbMixin,
++                addr_pair_db.AllowedAddressPairsMixin,
++                extradhcpopt_db.ExtraDhcpOptMixin,
++		interface.OVSInterfaceDriver):
++
++    """Implement the Neutron L2 abstractions using modules.
++
++    Ml2Plugin is a Neutron plugin based on separately extensible sets
++    of network types and mechanisms for connecting to networks of
++    those types. The network types and mechanisms are implemented as
++    drivers loaded via Python entry points. Networks can be made up of
++    multiple segments (not yet fully implemented).
++    """
++
++    # This attribute specifies whether the plugin supports or not
++    # bulk/pagination/sorting operations. Name mangling is used in
++    # order to ensure it is qualified by class
++    __native_bulk_support = True
++    __native_pagination_support = True
++    __native_sorting_support = True
++
++    # List of supported extensions
++ 
++    
++    _supported_extension_aliases = ["provider", "external-net", "binding",
++                                    "quotas", "security-group", "agent",
++                                    "dhcp_agent_scheduler",
++                                    "multi-provider", "allowed-address-pairs",
++                                    "extra_dhcp_opt"]
++    @property
++    def supported_extension_aliases(self):
++        if not hasattr(self, '_aliases'):
++            aliases = self._supported_extension_aliases[:]
++            sg_rpc.disable_security_group_extension_if_noop_driver(aliases)
++            self._aliases = aliases
++        return self._aliases
++
++    def __init__(self):
++        LOG.info(_("init called"))
++	# First load drivers, then initialize DB, then initialize drivers
++        self.type_manager = managers.TypeManager()
++        self.mechanism_manager = managers.MechanismManager()
++        db.initialize()
++        self.type_manager.initialize()
++        self.mechanism_manager.initialize()
++
++        self._setup_rpc()
++
++        # REVISIT(rkukura): Use stevedore for these?
++        self.network_scheduler = importutils.import_object(
++            cfg.CONF.network_scheduler_driver
++        )
++
++
++        self.conf = cfg.CONF
++        self.root_helper = "sudo neutron-rootwrap /etc/neutron/rootwrap.conf"
++	self.router_info = {}
++        #self.router_namespace="neutron_router_namespace"                           # Common namespace for SNAT / DNAT Ports
++        #self.snat_dnat_namespace="neutron_snat_dnat_namespace"
++
++        LOG.info(_("Modular L2 Plugin initialization complete"))
++
++    def _setup_rpc(self):
++        self.notifier = rpc.AgentNotifierApi(topics.AGENT)
++        self.agent_notifiers[const.AGENT_TYPE_DHCP] = (
++            dhcp_rpc_agent_api.DhcpAgentNotifyAPI()
++        )
++        self.callbacks = rpc.RpcCallbacks(self.notifier, self.type_manager)
++        self.topic = topics.PLUGIN
++        self.conn = c_rpc.create_connection(new=True)
++        self.dispatcher = self.callbacks.create_rpc_dispatcher()
++        self.conn.create_consumer(self.topic, self.dispatcher,
++                                  fanout=False)
++        self.conn.consume_in_thread()
++
++    def _process_provider_segment(self, segment):
++        LOG.info(_("process_provider_segment called"))
++        LOG.info(_("process_provider_segment called segment: %s"), segment)
++        network_type = self._get_attribute(segment, provider.NETWORK_TYPE)
++        physical_network = self._get_attribute(segment,
++                                               provider.PHYSICAL_NETWORK)
++        segmentation_id = self._get_attribute(segment,
++                                              provider.SEGMENTATION_ID)
++
++        if attributes.is_attr_set(network_type):
++            segment = {api.NETWORK_TYPE: network_type,
++                       api.PHYSICAL_NETWORK: physical_network,
++                       api.SEGMENTATION_ID: segmentation_id}
++            self.type_manager.validate_provider_segment(segment)
++            return segment
++
++        msg = _("network_type required")
++        raise exc.InvalidInput(error_message=msg)
++
++    def _process_provider_create(self, network):
++        LOG.info(_("process_provider_create called"))
++        LOG.info(_("process_provider_create called network: %s"), network)
++        segments = []
++
++        if any(attributes.is_attr_set(network.get(f))
++               for f in (provider.NETWORK_TYPE, provider.PHYSICAL_NETWORK,
++                         provider.SEGMENTATION_ID)):
++            # Verify that multiprovider and provider attributes are not set
++            # at the same time.
++            if attributes.is_attr_set(network.get(mpnet.SEGMENTS)):
++                raise mpnet.SegmentsSetInConjunctionWithProviders()
++
++            network_type = self._get_attribute(network, provider.NETWORK_TYPE)
++            physical_network = self._get_attribute(network,
++                                                   provider.PHYSICAL_NETWORK)
++            segmentation_id = self._get_attribute(network,
++                                                  provider.SEGMENTATION_ID)
++            segments = [{provider.NETWORK_TYPE: network_type,
++                         provider.PHYSICAL_NETWORK: physical_network,
++                         provider.SEGMENTATION_ID: segmentation_id}]
++        elif attributes.is_attr_set(network.get(mpnet.SEGMENTS)):
++            segments = network[mpnet.SEGMENTS]
++        else:
++            return
++
++        return [self._process_provider_segment(s) for s in segments]
++
++    def _get_attribute(self, attrs, key):
++        LOG.info(_("get_attributes called attrs: %s"), attrs)
++        LOG.info(_("get_attributes called key: %s"), key)
++        value = attrs.get(key)
++        if value is attributes.ATTR_NOT_SPECIFIED:
++            value = None
++        return value
++
++    def _extend_network_dict_provider(self, context, network):
++        LOG.info(_("extend_network_dict_provider called"))
++        LOG.info(_("extend_network_dict_provider called network: %s"), network)
++        LOG.info(_("extend_network_dict_provider called context: %s"), context)
++        id = network['id']
++        segments = db.get_network_segments(context.session, id)
++        if not segments:
++            LOG.error(_("Network %s has no segments"), id)
++            network[provider.NETWORK_TYPE] = None
++            network[provider.PHYSICAL_NETWORK] = None
++            network[provider.SEGMENTATION_ID] = None
++        elif len(segments) > 1:
++            network[mpnet.SEGMENTS] = [
++                {provider.NETWORK_TYPE: segment[api.NETWORK_TYPE],
++                 provider.PHYSICAL_NETWORK: segment[api.PHYSICAL_NETWORK],
++                 provider.SEGMENTATION_ID: segment[api.SEGMENTATION_ID]}
++                for segment in segments]
++        else:
++            segment = segments[0]
++            network[provider.NETWORK_TYPE] = segment[api.NETWORK_TYPE]
++            network[provider.PHYSICAL_NETWORK] = segment[api.PHYSICAL_NETWORK]
++            network[provider.SEGMENTATION_ID] = segment[api.SEGMENTATION_ID]
++        LOG.info(_("extend_network_dict_provider called over"))
++
++    def _filter_nets_provider(self, context, nets, filters):
++        # TODO(rkukura): Implement filtering.
++        return nets
++
++    def _process_port_binding(self, mech_context, attrs):
++        LOG.debug(_(" process_port_binding_called"))
++        LOG.debug(_(" process_port_binding_called mech_context: %s"), mech_context)
++        LOG.debug(_(" process_port_binding_called attrs: %s"), attrs)
++
++        binding = mech_context._binding
++        port = mech_context.current
++        LOG.debug(_(" process_port_binding_called binding: %s"), binding)
++        LOG.debug(_(" process_port_binding_called port: %s"),port)
++
++        self._update_port_dict_binding(port, binding)
++
++        host = attrs and attrs.get(portbindings.HOST_ID)
++        host_set = attributes.is_attr_set(host)
++
++        if binding.vif_type != portbindings.VIF_TYPE_UNBOUND:
++            LOG.debug(_(" binding.vif_type is not unbounded"))
++            if (not host_set and binding.segment and
++                self.mechanism_manager.validate_port_binding(mech_context)):
++                return False
++            LOG.debug(_(" mechanism_manager.unbind_port being called in db_base_plugin_v2"))
++            self.mechanism_manager.unbind_port(mech_context)
++            self._update_port_dict_binding(port, binding)
++
++        if host_set:
++            LOG.debug(_("process_port_binding called host_set is True"))
++            binding.host = host
++            port[portbindings.HOST_ID] = host
++
++        if binding.host:
++            LOG.debug(_(" process_port_binding clled binding.host not empty"))
++            self.mechanism_manager.bind_port(mech_context)
++            self._update_port_dict_binding(port, binding)
++
++        LOG.debug(_(" process_port_binding_called over"))
++
++        return True
++
++    def _update_port_dict_binding(self, port, binding):
++        LOG.info(_("update_port_disct_binding called"))
++        port[portbindings.HOST_ID] = binding.host
++        port[portbindings.VIF_TYPE] = binding.vif_type
++        port[portbindings.CAPABILITIES] = {
++            portbindings.CAP_PORT_FILTER: binding.cap_port_filter}
++        LOG.info(_("update_port_disct_binding called host_id: %s"),binding.host)
++        LOG.info(_("update_port_disct_binding called vif_type: %s"),binding.vif_type)
++        LOG.info(_("update_port_disct_binding called over"))
++
++
++    def _delete_port_binding(self, mech_context):
++        LOG.info(_("delete_port_binding called"))
++        binding = mech_context._binding
++        port = mech_context.current
++        self._update_port_dict_binding(port, binding)
++        self.mechanism_manager.unbind_port(mech_context)
++        self._update_port_dict_binding(port, binding)
++
++    def _ml2_extend_port_dict_binding(self, port_res, port_db):
++        LOG.info(_("_ml2_exten_port_dict called"))
++        LOG.info(_("_ml2_exten_port_dict called port_res: %s"), port_res)
++        LOG.info(_("_ml2_exten_port_dict called port_db: %s"),port_db)
++        # None when called during unit tests for other plugins.
++        if port_db.port_binding:
++            self._update_port_dict_binding(port_res, port_db.port_binding)
++        LOG.info(_("_ml2_exten_port_dict called over"))
++
++
++    db_base_plugin_v2.NeutronDbPluginV2.register_dict_extend_funcs(
++        attributes.PORTS, ['_ml2_extend_port_dict_binding'])
++
++    # Note - The following hook methods have "ml2" in their names so
++    # that they are not called twice during unit tests due to global
++    # registration of hooks in portbindings_db.py used by other
++    # plugins.
++
++    def _ml2_port_model_hook(self, context, original_model, query):
++        LOG.info(_("ml2_port_model_hook called"))
++        query = query.outerjoin(models.PortBinding,
++                                (original_model.id ==
++                                 models.PortBinding.port_id))
++        LOG.info(_("ml2_port_model_hook called context: %s"), context)
++        LOG.info(_("ml2_port_model_hook called original: %s"), original_model)
++        LOG.info(_("ml2_port_model_hook called query: %s"), query)
++        return query
++
++    def _ml2_port_result_filter_hook(self, query, filters):
++        LOG.info(_("ml2_port_result_filter_hook called"))
++        LOG.info(_("ml2_port_result_filter_hook called query: %s"), query)
++        LOG.info(_("ml2_port_result_filter_hook called filters: %s"),filters)
++        values = filters and filters.get(portbindings.HOST_ID, [])
++        if not values:
++            return query
++        return query.filter(models.PortBinding.host.in_(values))
++
++    db_base_plugin_v2.NeutronDbPluginV2.register_model_query_hook(
++        models_v2.Port,
++        "ml2_port_bindings",
++        '_ml2_port_model_hook',
++        None,
++        '_ml2_port_result_filter_hook')
++
++    def _notify_port_updated(self, mech_context):
++        LOG.info(_("notify_port_update called"))
++        port = mech_context._port
++        segment = mech_context.bound_segment
++        if not segment:
++            # REVISIT(rkukura): This should notify agent to unplug port
++            network = mech_context.network.current
++            LOG.warning(_("In _notify_port_updated(), no bound segment for "
++                          "port %(port_id)s on network %(network_id)s"),
++                        {'port_id': port['id'],
++                         'network_id': network['id']})
++            return
++
++        nw= mech_context.network
++	LOG.debug(_("Notify_port_update segment context: %s"), segment)
++        LOG.debug(_("Notify_port_update port context: %s"), port)
++        LOG.debug(_("Notify_port_update network.current context: %s"), nw.current)
++        LOG.debug(_("Notify_port_update network.network_segment context: %s"), nw.network_segments)
++
++	
++
++        self.notifier.port_update(mech_context._plugin_context, port,
++                                  segment[api.NETWORK_TYPE],
++                                  segment[api.SEGMENTATION_ID],
++                                  segment[api.PHYSICAL_NETWORK])
++
++	# call snat_port_update() so that we can inform each agent that snat port has been added
++	if port['device_owner'] == "network:router_gateway":
++		
++		self.notifier.snat_port_update(mech_context._plugin_context, port,
++                                  		segment[api.NETWORK_TYPE],
++                                  		segment[api.SEGMENTATION_ID],
++                                  		segment[api.PHYSICAL_NETWORK])
++	
++
++    # TODO(apech): Need to override bulk operations
++
++    def create_network(self, context, network):
++        LOG.info(_("create_network called"))
++        LOG.info(_("create_network called context: %s"), context)
++        LOG.info(_("create_network called network: %s"), network)
++        net_data = network['network']
++        segments = self._process_provider_create(net_data)
++        tenant_id = self._get_tenant_id_for_create(context, net_data)
++
++        session = context.session
++        with session.begin(subtransactions=True):
++            self._ensure_default_security_group(context, tenant_id)
++            result = super(Ml2Plugin, self).create_network(context, network)
++            network_id = result['id']
++            self._process_l3_create(context, result, net_data)
++            # REVISIT(rkukura): Consider moving all segment management
++            # to TypeManager.
++            if segments:
++                for segment in segments:
++                    self.type_manager.reserve_provider_segment(session,
++                                                               segment)
++                    db.add_network_segment(session, network_id, segment)
++            else:
++                segment = self.type_manager.allocate_tenant_segment(session)
++                db.add_network_segment(session, network_id, segment)
++            self._extend_network_dict_provider(context, result)
++            mech_context = driver_context.NetworkContext(self, context,
++                                                         result)
++            self.mechanism_manager.create_network_precommit(mech_context)
++
++        try:
++            self.mechanism_manager.create_network_postcommit(mech_context)
++        except ml2_exc.MechanismDriverError:
++            with excutils.save_and_reraise_exception():
++                LOG.error(_("mechanism_manager.create_network_postcommit "
++                            "failed, deleting network '%s'"), result['id'])
++                self.delete_network(context, result['id'])
++        return result
++
++    def update_network(self, context, id, network):
++        LOG.debug(_( "update_network called"))
++        provider._raise_if_updates_provider_attributes(network['network'])
++
++        session = context.session
++        with session.begin(subtransactions=True):
++            original_network = super(Ml2Plugin, self).get_network(context, id)
++            updated_network = super(Ml2Plugin, self).update_network(context,
++                                                                    id,
++                                                                    network)
++            self._process_l3_update(context, updated_network,
++                                    network['network'])
++            self._extend_network_dict_provider(context, updated_network)
++            mech_context = driver_context.NetworkContext(
++                self, context, updated_network,
++                original_network=original_network)
++            self.mechanism_manager.update_network_precommit(mech_context)
++
++        # TODO(apech) - handle errors raised by update_network, potentially
++        # by re-calling update_network with the previous attributes. For
++        # now the error is propogated to the caller, which is expected to
++        # either undo/retry the operation or delete the resource.
++        self.mechanism_manager.update_network_postcommit(mech_context)
++        return updated_network
++
++    def get_network(self, context, id, fields=None):
++        LOG.info(_("get_network called network_id: %s"), id)
++        LOG.info(_("get_network called context: %s"), context)
++        session = context.session
++        with session.begin(subtransactions=True):
++            result = super(Ml2Plugin, self).get_network(context, id, None)
++	    LOG.info(_("get_network called result: %s"), result)
++            self._extend_network_dict_provider(context, result)
++
++        LOG.info(_("get_network called over"))
++        return self._fields(result, fields)
++
++    def get_networks(self, context, filters=None, fields=None,
++                     sorts=None, limit=None, marker=None, page_reverse=False):
++        LOG.info(_("get_networks called"))
++        session = context.session
++        with session.begin(subtransactions=True):
++            nets = super(Ml2Plugin,
++                         self).get_networks(context, filters, None, sorts,
++                                            limit, marker, page_reverse)
++            for net in nets:
++                LOG.info(_("individual network called returner: %s"), net)
++                self._extend_network_dict_provider(context, net)
++
++            nets = self._filter_nets_provider(context, nets, filters)
++            nets = self._filter_nets_l3(context, nets, filters)
++
++        return [self._fields(net, fields) for net in nets]
++
++    def delete_network(self, context, id):
++        # REVISIT(rkukura) The super(Ml2Plugin, self).delete_network()
++        # function is not used because it auto-deletes ports and
++        # subnets from the DB without invoking the derived class's
++        # delete_port() or delete_subnet(), preventing mechanism
++        # drivers from being called. This approach should be revisited
++        # when the API layer is reworked during icehouse.
++
++        LOG.debug(_("Deleting network %s called"), id)
++        session = context.session
++        while True:
++            try:
++                with session.begin(subtransactions=True):
++                    # Get ports to auto-delete.
++                    ports = (session.query(models_v2.Port).
++                             enable_eagerloads(False).
++                             filter_by(network_id=id).
++                             with_lockmode('update').all())
++                    LOG.debug(_("Ports to auto-delete: %s"), ports)
++                    only_auto_del = all(p.device_owner
++                                        in db_base_plugin_v2.
++                                        AUTO_DELETE_PORT_OWNERS
++                                        for p in ports)
++                    if not only_auto_del:
++                        LOG.debug(_("Tenant-owned ports exist"))
++                        raise exc.NetworkInUse(net_id=id)
++
++                    # Get subnets to auto-delete.
++                    subnets = (session.query(models_v2.Subnet).
++                               enable_eagerloads(False).
++                               filter_by(network_id=id).
++                               with_lockmode('update').all())
++                    LOG.debug(_("Subnets to auto-delete: %s"), subnets)
++
++                    if not (ports or subnets):
++                        network = self.get_network(context, id)
++                        mech_context = driver_context.NetworkContext(self,
++                                                                     context,
++                                                                     network)
++                        self.mechanism_manager.delete_network_precommit(
++                            mech_context)
++
++                        record = self._get_network(context, id)
++                        LOG.debug(_("Deleting network record %s"), record)
++                        session.delete(record)
++
++                        for segment in mech_context.network_segments:
++                            self.type_manager.release_segment(session, segment)
++
++                        # The segment records are deleted via cascade from the
++                        # network record, so explicit removal is not necessary.
++                        LOG.debug(_("Committing transaction"))
++                        break
++            except os_db.exception.DBError as e:
++                if isinstance(e.inner_exception, sql_exc.IntegrityError):
++                    msg = _("A concurrent port creation has occurred")
++                    LOG.warning(msg)
++                    continue
++                else:
++                    raise
++
++            for port in ports:
++                try:
++                    self.delete_port(context, port.id)
++                except Exception:
++                    LOG.exception(_("Exception auto-deleting port %s"),
++                                  port.id)
++                    raise
++
++            for subnet in subnets:
++                try:
++                    self.delete_subnet(context, subnet.id)
++                except Exception:
++                    LOG.exception(_("Exception auto-deleting subnet %s"),
++                                  subnet.id)
++                    raise
++
++        try:
++            self.mechanism_manager.delete_network_postcommit(mech_context)
++        except ml2_exc.MechanismDriverError:
++            # TODO(apech) - One or more mechanism driver failed to
++            # delete the network.  Ideally we'd notify the caller of
++            # the fact that an error occurred.
++            LOG.error(_("mechanism_manager.delete_network_postcommit failed"))
++        self.notifier.network_delete(context, id)
++
++    def create_subnet(self, context, subnet):
++        LOG.info(_("create_subnet called"))
++        session = context.session
++        with session.begin(subtransactions=True):
++            result = super(Ml2Plugin, self).create_subnet(context, subnet)
++            mech_context = driver_context.SubnetContext(self, context, result)
++            self.mechanism_manager.create_subnet_precommit(mech_context)
++
++        try:
++            self.mechanism_manager.create_subnet_postcommit(mech_context)
++        except ml2_exc.MechanismDriverError:
++            with excutils.save_and_reraise_exception():
++                LOG.error(_("mechanism_manager.create_subnet_postcommit "
++                            "failed, deleting subnet '%s'"), result['id'])
++                self.delete_subnet(context, result['id'])
++        return result
++
++    def update_subnet(self, context, id, subnet):
++        LOG.info(_("update_subnet called"))
++        session = context.session
++        with session.begin(subtransactions=True):
++            original_subnet = super(Ml2Plugin, self).get_subnet(context, id)
++            updated_subnet = super(Ml2Plugin, self).update_subnet(
++                context, id, subnet)
++            mech_context = driver_context.SubnetContext(
++                self, context, updated_subnet, original_subnet=original_subnet)
++            self.mechanism_manager.update_subnet_precommit(mech_context)
++
++        # TODO(apech) - handle errors raised by update_subnet, potentially
++        # by re-calling update_subnet with the previous attributes. For
++        # now the error is propogated to the caller, which is expected to
++        # either undo/retry the operation or delete the resource.
++        self.mechanism_manager.update_subnet_postcommit(mech_context)
++        return updated_subnet
++
++    def delete_subnet(self, context, id):
++        # REVISIT(rkukura) The super(Ml2Plugin, self).delete_subnet()
++        # function is not used because it auto-deletes ports from the
++        # DB without invoking the derived class's delete_port(),
++        # preventing mechanism drivers from being called. This
++        # approach should be revisited when the API layer is reworked
++        # during icehouse.
++
++        LOG.debug(_("Deleting subnet %s called"), id)
++        session = context.session
++        while True:
++            with session.begin(subtransactions=True):
++                subnet = self.get_subnet(context, id)
++                # Get ports to auto-delete.
++                allocated = (session.query(models_v2.IPAllocation).
++                             filter_by(subnet_id=id).
++                             join(models_v2.Port).
++                             filter_by(network_id=subnet['network_id']).
++                             with_lockmode('update').all())
++                LOG.debug(_("Ports to auto-delete: %s"), allocated)
++                only_auto_del = all(not a.port_id or
++                                    a.ports.device_owner in db_base_plugin_v2.
++                                    AUTO_DELETE_PORT_OWNERS
++                                    for a in allocated)
++                if not only_auto_del:
++                    LOG.debug(_("Tenant-owned ports exist"))
++                    raise exc.SubnetInUse(subnet_id=id)
++
++                if not allocated:
++                    mech_context = driver_context.SubnetContext(self, context,
++                                                                subnet)
++                    self.mechanism_manager.delete_subnet_precommit(
++                        mech_context)
++
++                    LOG.debug(_("Deleting subnet record"))
++                    record = self._get_subnet(context, id)
++                    session.delete(record)
++
++                    LOG.debug(_("Committing transaction"))
++                    break
++
++            for a in allocated:
++                try:
++                    self.delete_port(context, a.port_id)
++                except Exception:
++                    LOG.exception(_("Exception auto-deleting port %s"),
++                                  a.port_id)
++                    raise
++
++        try:
++            self.mechanism_manager.delete_subnet_postcommit(mech_context)
++        except ml2_exc.MechanismDriverError:
++            # TODO(apech) - One or more mechanism driver failed to
++            # delete the subnet.  Ideally we'd notify the caller of
++            # the fact that an error occurred.
++            LOG.error(_("mechanism_manager.delete_subnet_postcommit failed"))
++
++    def create_port(self, context, port):
++        LOG.debug(_(" create_port called with context: %s"),context)
++        LOG.debug(_(" create_port called with context roles: %s"),context.roles)
++        LOG.debug(_(" create_port called with context session: %s"),context.session)
++        LOG.debug(_(" create_port called with context is_admin: %s"),context.is_admin)
++        LOG.debug(_(" create_port called with context project_id: %s"),context.project_id)
++        LOG.debug(_(" create_port called with context tenant_id: %s"),context.tenant_id)
++        LOG.debug(_(" create_port called with context: %s"),context.user_id)
++        LOG.debug(_(" create_port called with port: %s"),port)
++
++        attrs = port['port']
++        attrs['status'] = const.PORT_STATUS_DOWN
++
++        session = context.session
++        with session.begin(subtransactions=True):
++            self._ensure_default_security_group_on_port(context, port)
++            sgids = self._get_security_groups_on_port(context, port)
++            dhcp_opts = port['port'].get(edo_ext.EXTRADHCPOPTS, [])
++            result = super(Ml2Plugin, self).create_port(context, port)
++            LOG.debug(_(" create_port called result: %s"),result)
++            self._process_port_create_security_group(context, result, sgids)
++            network = self.get_network(context, result['network_id'])
++            LOG.debug(_(" create_port called network: %s"),network)
++            mech_context = driver_context.PortContext(self, context, result,
++                                                      network)
++
++            LOG.debug(_(" create_port called mech_context: %s"),mech_context)
++            LOG.debug(_(" create_port called mech_context.network.current: %s"),mech_context.network.current)
++            LOG.debug(_(" create_port called mech_context.network.original: %s"),mech_context.network.original)
++            LOG.debug(_(" create_port called mech_context.network_segments: %s"),mech_context.network.network_segments)
++            LOG.debug(_(" create_port called mech_context.current: %s"),mech_context.current)
++            LOG.debug(_(" create_port called mech_context.bound_segment: %s"),mech_context.bound_segment)
++
++
++            self._process_port_binding(mech_context, attrs)
++            result[addr_pair.ADDRESS_PAIRS] = (
++                self._process_create_allowed_address_pairs(
++                    context, result,
++                    attrs.get(addr_pair.ADDRESS_PAIRS)))
++            self._process_port_create_extra_dhcp_opts(context, result,
++                                                      dhcp_opts)
++	    LOG.debug(_(" mechanism_manager called for create_port_precommit"))
++            self.mechanism_manager.create_port_precommit(mech_context)
++
++
++        LOG.debug(_(" mechanism_manager called for create_port_postcommit"))
++        try:
++            self.mechanism_manager.create_port_postcommit(mech_context)
++        except ml2_exc.MechanismDriverError:
++            with excutils.save_and_reraise_exception():
++                LOG.error(_("mechanism_manager.create_port_postcommit "
++                            "failed, deleting port '%s'"), result['id'])
++                self.delete_port(context, result['id'])
++        self.notify_security_groups_member_updated(context, result)
++        
++        LOG.debug(_(" context.current: %s"),mech_context.current)
++        LOG.debug(_(" context.original: %s"),mech_context.original)
++        LOG.debug(_(" create_port called over"))
++	return result
++
++    def update_port(self, context, id, port):
++        LOG.debug(_(" update_port called with port: %s"),port)
++        LOG.debug(_(" update_port called with id: %s"),id)
++        LOG.debug(_(" update_port called with context: %s"),context)
++        attrs = port['port']
++        need_port_update_notify = False
++
++        session = context.session
++        changed_fixed_ips = 'fixed_ips' in port['port']
++        with session.begin(subtransactions=True):
++            original_port = super(Ml2Plugin, self).get_port(context, id)
++            updated_port = super(Ml2Plugin, self).update_port(context, id,
++                                                              port)
++            if addr_pair.ADDRESS_PAIRS in port['port']:
++                self._delete_allowed_address_pairs(context, id)
++                self._process_create_allowed_address_pairs(
++                    context, updated_port,
++                    port['port'][addr_pair.ADDRESS_PAIRS])
++                need_port_update_notify = True
++            elif changed_fixed_ips:
++                self._check_fixed_ips_and_address_pairs_no_overlap(
++                    context, updated_port)
++            need_port_update_notify |= self.update_security_group_on_port(
++                context, id, port, original_port, updated_port)
++            network = self.get_network(context, original_port['network_id'])
++            need_port_update_notify |= self._update_extra_dhcp_opts_on_port(
++                context, id, port, updated_port)
++            mech_context = driver_context.PortContext(
++                self, context, updated_port, network,
++                original_port=original_port)
++            need_port_update_notify |= self._process_port_binding(
++                mech_context, attrs)
++            self.mechanism_manager.update_port_precommit(mech_context)
++
++        # TODO(apech) - handle errors raised by update_port, potentially
++        # by re-calling update_port with the previous attributes. For
++        # now the error is propogated to the caller, which is expected to
++        # either undo/retry the operation or delete the resource.
++        self.mechanism_manager.update_port_postcommit(mech_context)
++
++        need_port_update_notify |= self.is_security_group_member_updated(
++            context, original_port, updated_port)
++
++        if original_port['admin_state_up'] != updated_port['admin_state_up']:
++            need_port_update_notify = True
++
++        if need_port_update_notify:
++            self._notify_port_updated(mech_context)
++	    ''' 
++	    Important call.. notify_port_updated -> /neutron/plugins/ml2/rpc.py
++	    The above function calls port_update function from plugin -> agent
++	    On OVS Agent port_update received. In agent, in port_update() it calls update_device_up() from agent -> plugin
++	    device_update_up() in rpc.py calls plugin.port_bound_to_host and update_port_status
++	    '''
++
++        return updated_port
++
++    def delete_port(self, context, id, l3_port_check=True):
++        LOG.debug(_("Deleting port called %s"), id)
++        l3plugin = manager.NeutronManager.get_service_plugins().get(
++            service_constants.L3_ROUTER_NAT)
++        if l3plugin and l3_port_check:
++            l3plugin.prevent_l3_port_deletion(context, id)
++
++        session = context.session
++        with session.begin(subtransactions=True):
++            if l3plugin:
++                l3plugin.disassociate_floatingips(context, id)
++            port = self.get_port(context, id)
++            network = self.get_network(context, port['network_id'])
++            mech_context = driver_context.PortContext(self, context, port,
++                                                      network)
++            self.mechanism_manager.delete_port_precommit(mech_context)
++            self._delete_port_binding(mech_context)
++            self._delete_port_security_group_bindings(context, id)
++            LOG.debug(_("Calling base delete_port"))
++            super(Ml2Plugin, self).delete_port(context, id)
++
++        try:
++            self.mechanism_manager.delete_port_postcommit(mech_context)
++        except ml2_exc.MechanismDriverError:
++            # TODO(apech) - One or more mechanism driver failed to
++            # delete the port.  Ideally we'd notify the caller of the
++            # fact that an error occurred.
++            LOG.error(_("mechanism_manager.delete_port_postcommit failed"))
++        self.notify_security_groups_member_updated(context, port)
++
++    def update_port_status(self, context, port_id, status):
++        LOG.info(_("update_port_status called"))
++        updated = False
++        session = context.session
++        with session.begin(subtransactions=True):
++            port = db.get_port(session, port_id)
++	    LOG.debug(_("update_port_status called port: %s"),port)
++            LOG.debug(_("update_port_status called status: %s"),status)
++            if not port:
++                LOG.warning(_("Port %(port)s updated up by agent not found"),
++                            {'port': port_id})
++                return False
++            if port.status != status:
++                original_port = self._make_port_dict(port)
++                port.status = status
++                LOG.debug(_("update_port_status called original_port: %s"),original_port)
++                updated_port = self._make_port_dict(port)
++                LOG.debug(_("update_port_status called updated_port: %s"),updated_port)
++                network = self.get_network(context,
++                                           original_port['network_id'])
++                LOG.debug(_("update_port_status called network: %s"),network)
++                # Update MechContext detail- Creates an object of PortContext having the needed details
++		mech_context = driver_context.PortContext(
++                    self, context, updated_port, network,
++                    original_port=original_port)
++        	LOG.debug(_(" update_port_status called with context original: %s"),mech_context.original)
++	        LOG.debug(_(" update_port_status called with context curent: %s"),mech_context.current)
++        	LOG.debug(_(" update_port_status called with context network: %s"),mech_context.network)
++        	LOG.debug(_(" update_port_status called with context binding: %s"),mech_context._binding)
++                self.mechanism_manager.update_port_precommit(mech_context)
++                updated = True
++
++        if updated:
++            self.mechanism_manager.update_port_postcommit(mech_context)
++
++        LOG.info(_("update_port_status called over"))
++
++        return True
++
++    def port_bound_to_host(self, port_id, host):
++        LOG.info(_("port_bound_to_host called"))
++        port_host = db.get_port_binding_host(port_id)
++        LOG.info(_("port_bound_to_host called over"))
++        return (port_host == host)
++
++    # FROM HERE ON NEUTRON-L3-AGENT'S CODE REUSED IN ML2 PLUGIN ITSELF ( not completely but minimal needed functionality )
++
++    def get_internal_device_name(self, port_id):
++        return (INTERNAL_DEV_PREFIX + port_id)[:self.DEV_NAME_LEN]
++
++    def get_external_device_name(self, port_id):
++        return (EXTERNAL_DEV_PREFIX + port_id)[:self.DEV_NAME_LEN]
++
++
++    def update_router_interface(self, context, router_id):
++    	LOG.debug(_("update_router_interface called context: %s"), context)
++        LOG.debug(_("update_router_interface called router_id: %s"), router_id)
++
++	#router = super(L3RouterPlugin, self)._sync_routers(context,"rhel65-rack1",router_id)
++     	self.l3_rpc_base_obj = l3_rpc_base.L3RpcCallbackMixin()
++	router = self.l3_rpc_base_obj._sync_routers(context, 'rhel65-30', [router_id] )
++	LOG.debug(_("router FLAG1: %s"), router)
++	self._process_router(context, router)
++
++ 
++    def process_routers(self, ri):
++	LOG.debug(_("process_router called ri: %s"), ri)
++	ex_gw_port = self._get_ex_gw_port(ri)
++        internal_ports = ri.router.get('_interfaces')                                                   # get 'interfaces' / all ports from ri.router
++        existing_port_ids = set([p['id'] for p in ri.internal_ports])                                                   # already existing ports
++        if internal_ports:
++		current_port_ids = set([p['id'] for p in internal_ports
++					if p['admin_state_up']]) 
++	else:
++		current_port_ids= set()
++        if internal_ports:
++        	new_ports = [p for p in internal_ports if
++                	     p['id'] in current_port_ids and
++                     	     p['id'] not in existing_port_ids]
++	else:
++		new_ports = []
++
++        if ri.internal_ports:
++		old_ports = [p for p in ri.internal_ports if
++                	    p['id'] not in current_port_ids]
++	else:
++		old_ports = []
++        
++	for p in new_ports:
++                self._set_subnet_info(p)
++                ri.internal_ports.append(p)
++                self.internal_network_added(ri, p['network_id'], p['id'], p['ip_cidr'], p['mac_address'])
++	
++
++	internal_cidrs = [p['ip_cidr'] for p in ri.internal_ports]
++        ex_gw_port_id = (ex_gw_port and ex_gw_port['id'] or ri.ex_gw_port and ri.ex_gw_port['id'])
++        interface_name = None
++        if ex_gw_port_id:
++            interface_name = self.get_external_device_name(ex_gw_port_id)
++        if ex_gw_port and not ri.ex_gw_port:
++            self._set_subnet_info(ex_gw_port)
++            self.external_gateway_added(ri, ex_gw_port, interface_name, internal_cidrs)
++
++        if ex_gw_port:
++            self.process_router_floating_ips(ri, ex_gw_port)
++
++    
++    def process_router_floating_ips(self, ri, ex_gw_port):
++        """Configure the router's floating IPs
++        Configures floating ips in iptables and on the router's gateway device.
++
++        Cleans up floating ips that should not longer be configured.
++        """
++	LOG.debug(_("process_router_floating_ips called ri: %s"), ri)
++	LOG.debug(_("process_router_floating_ips called ex_gw_port: %s"), ex_gw_port)
++        interface_name = self.get_external_device_name(ex_gw_port['id'])
++        device = ip_lib.IPDevice(interface_name, self.root_helper)
++
++        existing_cidrs = set([addr['cidr'] for addr in device.addr.list()])
++        new_cidrs = set()
++
++        # Loop once to ensure that floating ips are configured.
++        for fip in ri.router.get(const.FLOATINGIP_KEY, []):
++            fip_ip = fip['floating_ip_address']
++            ip_cidr = str(fip_ip) + FLOATING_IP_CIDR_SUFFIX
++
++            new_cidrs.add(ip_cidr)
++
++            if ip_cidr not in existing_cidrs:
++                net = netaddr.IPNetwork(ip_cidr)
++                device.addr.add(net.version, ip_cidr, str(net.broadcast))
++
++    def _process_router(self, context, router ):
++	if not ip_lib.device_exists("br-ex"):
++        	LOG.error(_("The external network bridge '%s' does not exist"), "br-ex")
++                return
++
++        router=router[0]
++        LOG.debug(_("router in _process_router called: %s"), router)
++	#target_ex_net_id = self._fetch_external_net_id(context)
++        if not router['admin_state_up']:
++        	return
++
++        #ex_net_id = (router['external_gateway_info'] or {}).get('network_id')
++        '''
++	All networks handled by common agent
++	if ex_net_id and ex_net_id != target_ex_net_id:
++        	return
++        '''
++	if router['id'] not in self.router_info:
++        	ri = RouterInfo(router['id'], self.root_helper, router)
++		self.router_info[router['id']] = ri
++		#self._router_added(router['id'], router)
++        ri = self.router_info[router['id']]
++        ri.router = router
++	self.process_routers(ri)
++
++
++    def _fetch_external_net_id(self, context):
++        LOG.debug(_(" L3 fetch external id called"))
++        """Find UUID of single external network for this agent."""              # Remeber 1 external network per L3 Agent
++        try:
++        	return self.get_external_network_id(context)               	# else ask plugin for the external_netwokr_id
++        except rpc_common.RemoteError as e:
++        	if e.exc_type == 'TooManyExternalNetworks':
++                	msg = _("The 'gateway_external_network_id' option must be configured for this agent as Neutron has more than one external network.")
++                raise Exception(msg)
++
++    def _get_ex_gw_port(self, ri):
++        return ri.router.get('gw_port')
++
++    def _set_subnet_info(self, port):
++    	LOG.debug(_(" L3 set_subnet_info called"))
++        ips = port['fixed_ips']
++        if not ips:
++        	raise Exception(_("Router port %s has no IP address") % port['id'])
++        if len(ips) > 1:
++        	LOG.error(_("Ignoring multiple IPs on router port %s"), port['id'])
++        prefixlen = netaddr.IPNetwork(port['subnet']['cidr']).prefixlen
++        port['ip_cidr'] = "%s/%s" % (ips[0]['ip_address'], prefixlen)
++        # 'ip_cidr': u'10.10.1.1/24 NOTE ip_cidr NOT subnet_cidr
++
++    def internal_network_added(self, ri, network_id, port_id, internal_cidr, mac_address):
++    	LOG.debug(_(" L3 internal network added called"))
++	interface_name = self.get_internal_device_name(port_id)
++	'''
++	try:
++                self.driver = importutils.import_object("neutron.agent.linux.interface.OVSInterfaceDriver", self.conf)
++        except Exception:
++            msg = _("Error importing interface driver")
++            LOG.error(msg)
++            raise SystemExit(msg)
++	'''
++        if not ip_lib.device_exists(interface_name, root_helper=self.root_helper):
++	        LOG.debug(_(" driver.plug called"))
++        	self.plug( network_id, port_id, interface_name, mac_address, prefix=INTERNAL_DEV_PREFIX)
++
++        self.init_l3(interface_name, [internal_cidr] )
++
++
++    def external_gateway_added(self, ri, ex_gw_port, interface_name, internal_cidrs):
++        LOG.debug(_(" external_gateway_added called"))
++        if not ip_lib.device_exists(interface_name, root_helper=self.root_helper):
++            self.plug( ex_gw_port['network_id'], ex_gw_port['id'], interface_name, ex_gw_port['mac_address'], bridge="br-ex", prefix=EXTERNAL_DEV_PREFIX)
++        self.init_l3(interface_name, [ex_gw_port['ip_cidr']])
++
++
++    def _update_fip_assoc(self, context, fixed_ip, floating_ip, fixed_mac, fixed_network_id, floating_network_id, router_id, floatingip_id, floatingip_mac):
++	self.notifier.fip_port_update(context, fixed_ip, floating_ip, fixed_mac, fixed_network_id, floating_network_id, router_id, floatingip_id, floatingip_mac)
++
++	
++class RouterInfo(object):
++
++    def __init__(self, router_id, root_helper, router):
++        LOG.debug(_("RouterInfo class init called"))
++	self.router_id = router_id
++        self.ex_gw_port = None
++        self.internal_ports = []
++        self.root_helper = root_helper
++        self._router = router
++
++        self.routes = []
++
++    @property
++    def router(self):
++        return self._router
++
++    @router.setter
++    def router(self, value):
++        self._router = value
++        if not self._router:
++            return
++        # enable_snat by default if it wasn't specified by plugin
++        self._snat_enabled = self._router.get('enable_snat', True)
++        # Set a SNAT action for the router
++        if self._router.get('gw_port'):
++            self._snat_action = ('add_rules' if self._snat_enabled
++                                 else 'remove_rules')
++        elif self.ex_gw_port:
++            # Gateway port was removed, remove rules
++            self._snat_action = 'remove_rules'
++
+diff -rupN old/neutron/plugins/ml2/rpc.py new/neutron/plugins/ml2/rpc.py
+--- old/neutron/plugins/ml2/rpc.py	2014-10-31 13:06:09.000000000 +0530
++++ new/neutron/plugins/ml2/rpc.py	2014-10-31 13:06:09.000000000 +0530
+@@ -231,3 +231,30 @@ class AgentNotifierApi(proxy.RpcProxy,
+                                        segmentation_id=segmentation_id,
+                                        physical_network=physical_network),
+                          topic=self.topic_port_update)
++
++    # call _add_snat_router_gateway() function in OVS agent on each host to add SNAT port flows
++    def snat_port_update(self, context, port, network_type, segmentation_id,
++                    physical_network):
++        self.fanout_cast(context,
++                         self.make_msg('_add_snat_router_gateway',
++                                       port=port,
++                                       network_type=network_type,
++                                       segmentation_id=segmentation_id,
++                                       physical_network=physical_network),
++                         topic=self.topic_port_update)
++
++    # call fip_port_update() function in OVS agent on each host to add DNAT port flows
++    def fip_port_update(self, context, fixed_ip, floating_ip, fixed_mac, fixed_network_id, floating_network_id, router_id, floatingip_id, floatingip_mac):
++        self.fanout_cast(context,
++                         self.make_msg('fip_port_update',
++                                       fixed_ip=fixed_ip,
++                                       floating_ip=floating_ip,
++                                       fixed_mac=fixed_mac,
++                                       fixed_network_id=fixed_network_id,
++                                       floating_network_id=floating_network_id,
++                                       router_id=router_id,
++                                       floatingip_id=floatingip_id,
++                                       floatingip_mac=floatingip_mac),
++                         topic=self.topic_port_update)
++
++
+diff -rupN old/neutron/plugins/openvswitch/agent/ovs_neutron_agent.py new/neutron/plugins/openvswitch/agent/ovs_neutron_agent.py
+--- old/neutron/plugins/openvswitch/agent/ovs_neutron_agent.py	2014-10-31 13:06:09.000000000 +0530
++++ new/neutron/plugins/openvswitch/agent/ovs_neutron_agent.py	2014-10-31 13:47:13.000000000 +0530
+@@ -25,6 +25,8 @@ import distutils.version as dist_version
+ import sys
+ import time
+ 
++import netaddr
++
+ import eventlet
+ from oslo.config import cfg
+ 
+@@ -53,6 +55,8 @@ LOG = logging.getLogger(__name__)
+ 
+ # A placeholder for dead vlans.
+ DEAD_VLAN_TAG = str(q_const.MAX_VLAN_TAG + 1)
++EXTERNAL_DEV_PREFIX = 'qg-'
++DEV_NAME_LEN = 14
+ 
+ 
+ # A class to represent a VIF (i.e., a port that has 'iface-id' and 'vif-mac'
+@@ -70,6 +74,8 @@ class LocalVLANMapping:
+         # set of tunnel ports on which packets should be flooded
+         self.tun_ofports = set()
+ 
++	self.integ_ofports= set()
++
+     def __str__(self):
+         return ("lv-id = %s type = %s phys-net = %s phys-id = %s" %
+                 (self.vlan, self.network_type, self.physical_network,
+@@ -154,8 +160,9 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+ 
+     def __init__(self, integ_br, tun_br, local_ip,
+                  bridge_mappings, root_helper,
++		 ext_br, network_node_tunnel_ip,ext_if,
+                  polling_interval, tunnel_types=None,
+-                 veth_mtu=None, l2_population=False):
++                 veth_mtu=None, l2_population=False ):
+         '''Constructor.
+ 
+         :param integ_br: name of the integration bridge.
+@@ -196,8 +203,14 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         self.local_vlan_map = {}
+         self.tun_br_ofports = {constants.TYPE_GRE: {},
+                                constants.TYPE_VXLAN: {}}
++	self.last_used_router_id=0
++	self.router_local_map= {}
++	self.snat_mac= {}
+ 
++        self.eth_if=ext_if
++	self.network_node_tunnel_ip=network_node_tunnel_ip                        # Currently hard-coded to identify the network node
+         self.polling_interval = polling_interval
++	self.ext_br=ext_br
+ 
+         if tunnel_types:
+             self.enable_tunneling = True
+@@ -209,6 +222,14 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         self._check_ovs_version()
+         if self.enable_tunneling:
+             self.setup_tunnel_br(tun_br)
++            # Without tunneling no external connectivity!
++	    LOG.debug(_("initialize external bridge"))
++            if self.local_ip == self.network_node_tunnel_ip:
++	        self.setup_external_bridge(ext_br)
++		#self.external_br = ovs_lib.OVSBridge(ext_br, self.root_helper)
++	    	self.initialize_tun_ext_link()
++	LOG.debug(_("initialize integ br start"))
++        self.initialize_integ_br()
+         # Collect additional bridges to monitor
+         self.ancillary_brs = self.setup_ancillary_bridges(integ_br, tun_br)
+ 
+@@ -217,6 +238,9 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                                               self.plugin_rpc,
+                                               root_helper)
+ 
++    def port_check(self, context):
++	LOG.debug(_("success!!"))
++
+     def _check_ovs_version(self):
+         if constants.TYPE_VXLAN in self.tunnel_types:
+             check_ovs_version(constants.MINIMUM_OVS_VXLAN_VERSION,
+@@ -267,7 +291,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                 return network_id
+ 
+     def network_delete(self, context, **kwargs):
+-        LOG.debug(_("network_delete received"))
++        LOG.debug(_("network_delete called"))
+         network_id = kwargs.get('network_id')
+         LOG.debug(_("Delete %s"), network_id)
+         # The network may not be defined on this agent
+@@ -276,12 +300,227 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+             self.reclaim_local_vlan(network_id)
+         else:
+             LOG.debug(_("Network %s not used on agent."), network_id)
++        LOG.debug(_("network_delete called over"))
++
++    
++    def get_external_device_name(self, port_id):
++        return (EXTERNAL_DEV_PREFIX + port_id)[:DEV_NAME_LEN]
++    
++
++    def _add_snat_router_gateway ( self, context, **kwargs ):
++        LOG.debug(_("add_snat_router_gateway called"))
++        LOG.debug(_("add_snat_router_gateway called context: %s"), context)
++        LOG.debug(_("add_snat_router_gateway called kwargs: %s"), kwargs)
++	port_context = kwargs.get('port')
++        network_id = port_context['network_id']
++        snat_mac_addr_str= port_context['mac_address']
++        device_owner= port_context['device_owner']
++        device_id= port_context['device_id']
++        snat_ip_str = [tmp['ip_address'] for tmp in port_context['fixed_ips'] ]			# This is a single element list! As router has only one gateway ata time
++
++        router_id_str= str(device_id)
++        LOG.debug(_("router_id string  %s"), router_id_str)
++	self.snat_mac[device_id]=snat_mac_addr_str						# Needed for DNAT port flow add
++	
++        if router_id_str in self.router_local_map.keys():
++   		router_id=self.router_local_map[router_id_str]
++        else:
++                self.last_used_router_id += 1                           # Currenlty a direct mechanism to generate router_id. This can be optimized like getting VLAN ID's for networks
++                self.router_local_map[router_id_str]=self.last_used_router_id
++                router_id=self.last_used_router_id
++
++
++        lvm = self.local_vlan_map.get(network_id)
++        if not lvm:
++                # if not managed then manage it, create a local VLAN for the networkID so that we can maintain its ARP_STORE and LOCAL_ARP_STORE. 
++                net_type=kwargs['network_type']
++                seg_id=kwargs['segmentation_id']
++                phys=kwargs['physical_network']
++                self.provision_local_vlan(network_id,net_type ,phys ,seg_id )
++
++        lvid= self.local_vlan_map[network_id].vlan
++        
++	self.int_br.add_flow(table=constants.EXTERNAL_ROUTING,
++                             priority=1,
++                             reg1="%s" % router_id,
++                             actions="mod_dl_dst:%s, mod_vlan_vid:%s, resubmit(,%s)" % (snat_mac_addr_str, lvid, constants.UCAST_MCAST_CHECK) )
++
++
++	self.int_br.add_flow(table=constants.UCAST_MCAST_CHECK,
++                             priority=1,
++                             dl_type=0x0800,
++                             dl_dst="%s" % snat_mac_addr_str,
++                             vlan_tci="%s/0x0fff"  % lvid,
++                             actions="load:%s->NXM_NX_REG0[], resubmit(,%s)" % (self.patch_tun_ofport, constants.FLOOD_TO_INT))
++
++        self.int_br.add_flow(table=constants.PACKET_FROM_EXTERNAL,
++                             priority=1,
++                             dl_type=0x0800,
++                             dl_src="%s" % snat_mac_addr_str,
++			     vlan_tci="%s/0x0fff"  % lvid,
++                             actions="load:%s->NXM_NX_REG2[], resubmit(,%s)" % (router_id, constants.CHANGE_SOURCE_MAC_TO_INTERNAL))
++
++	if self.local_ip != self.network_node_tunnel_ip:
++                self.tun_br.add_flow(table=constants.EXTERNAL_ROUTING_TUN,
++                                     priority=1,
++                                     dl_type=0x0800,
++                                     dl_dst="%s" % snat_mac_addr_str,
++				     vlan_tci="%s/0x0fff" % lvid,
++                                     actions="resubmit(,%s)" % constants.FLOOD_TO_CONTROLLER)
++
++
++                all_tun_ofports=self.tun_br_ofports[constants.TYPE_VXLAN]
++                LOG.debug(_("tun_br_ofports details: %s"), all_tun_ofports)
++                
++                network_tun_ofport = all_tun_ofports[self.network_node_tunnel_ip]
++                seg_id= self.local_vlan_map[network_id].segmentation_id
++                self.tun_br.add_flow(table=constants.FLOOD_TO_CONTROLLER,
++                                     priority=1,
++                                     dl_type=0x0800,
++                                     vlan_tci="%s/0x0fff" % lvid,
++                                     dl_dst="%s" %  snat_mac_addr_str,
++                                     actions="strip_vlan, set_tunnel:%s, output:%s" % (seg_id, network_tun_ofport))
++
++        else:
++	        self.tun_br.mod_flow(in_port=self.patch_ext_ofport_ingress,
++         	                     priority=1,
++                	             dl_type=0x0800,
++                        	     dl_src="%s" % self.snat_mac[device_id],
++				     vlan_tci="%s/0x0fff" % lvid,
++				     actions="resubmit(,%s)" %
++                             	     constants.UCAST_FROM_EXTERNAL ) 
++
++                self.tun_br.add_flow(table=constants.EXTERNAL_OR_OVERLAY_FROM_TUN, 
++                                     priority=1,
++                                     dl_type=0x0800,
++                                     dl_dst="%s" % snat_mac_addr_str,
++				     vlan_tci="%s/0x0fff" % lvid,
++                                     actions="resubmit(,%s)" % constants.EXTERNAL_LEARN_FROM_TUN)
++
++                self.tun_br.add_flow(table=constants.EXTERNAL_OR_OVERLAY_FROM_INT, 
++                                     priority=1,
++                                     dl_type=0x0800,
++                                     dl_dst="%s" % snat_mac_addr_str,
++                                     vlan_tci="%s/0x0fff" % lvid,
++                                     actions="resubmit(,%s)" % constants.EXTERNAL_LEARN_FROM_INT)
++
++		
++		eth_mac=port_context['mac_address']
++
++		learn_flow_icmp=("table=%s,"
++                       		 "priority=1,"
++                        	 "hard_timeout=100,"
++				 "dl_type=0x0800,"
++                        	 "NXM_OF_IP_PROTO[],"
++				 "NXM_OF_IP_SRC[]=NXM_OF_IP_DST[],"
++				 "NXM_OF_ETH_DST[],"
++				 "load:NXM_OF_VLAN_TCI[0..11]->NXM_OF_VLAN_TCI[0..11],"
++                        	 "load:NXM_OF_IP_SRC[]->NXM_OF_IP_DST[],"
++				 "load:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[],"
++				 "load:NXM_OF_ETH_DST[]->NXM_OF_ETH_SRC[],"
++                        	 "output:NXM_NX_REG0[]" %
++                        	 constants.LEARN_EXTERNAL_SESSION)
++
++                learn_flow_tcp=( "table=%s,"
++                                 "priority=1,"
++                                 "dl_type=0x0800,"
++                                 "hard_timeout=100,"
++                                 "nw_proto=6,"
++				 "NXM_OF_TCP_DST[]=NXM_OF_TCP_SRC[],"
++                                 "NXM_OF_IP_SRC[]=NXM_OF_IP_DST[],"
++                                 "NXM_OF_TCP_SRC[]=NXM_OF_TCP_DST[],"
++                                 "NXM_OF_ETH_DST[],"
++				 "load:NXM_OF_VLAN_TCI[0..11]->NXM_OF_VLAN_TCI[0..11],"
++                                 "load:NXM_OF_IP_SRC[]->NXM_OF_IP_DST[],"
++                                 "load:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[],"
++                                 "load:NXM_OF_ETH_DST[]->NXM_OF_ETH_SRC[],"
++                                 "output:NXM_NX_REG0[]" %
++                                 constants.LEARN_EXTERNAL_SESSION)
++
++		for val in snat_ip_str:									# Single element list
++	 	        LOG.debug(_("snat_ip_str value: %s"), val)
++			
++			self.external_br.add_flow ( table=constants.SNAT_DNAT_DECISION,
++						    priority=5,
++						    dl_type=0x0800,
++						    nw_proto=1,
++					            dl_dst="%s" % snat_mac_addr_str,
++			                            vlan_tci="%s/0x0fff"  % lvid,
++						    actions="learn(%s),mod_nw_src:%s,mod_dl_src:%s,resubmit(,%s)"
++                                                    % ( learn_flow_icmp, val, self.snat_mac[device_id], constants.ROUTING_AMONGST_VIRTUAL_ROUTERS))
++        
++                        self.external_br.add_flow ( table=constants.SNAT_DNAT_DECISION,
++                                                    priority=5,
++                                                    dl_type=0x0800,
++                                                    nw_proto=6,
++                                                    dl_dst="%s" %  snat_mac_addr_str,
++                                                    vlan_tci="%s/0x0fff"  % lvid,
++                                                    actions="learn(%s),mod_nw_src:%s,mod_dl_src:%s,resubmit(,%s)"
++                                                    % ( learn_flow_tcp, val, eth_mac, constants.ROUTING_AMONGST_VIRTUAL_ROUTERS))
++
++        		self.external_br.add_flow( table=constants.UPLINK_TO_EXT,
++						   dl_type=0x0800,
++						   priority=5,
++                        		           dl_dst="%s" % eth_mac,
++						   nw_dst="%s" % val,
++                                                   actions="resubmit(,%s)" % constants.LEARN_EXTERNAL_SESSION )
++
++                        self.external_br.add_flow( table=constants.UPLINK_TO_EXT,
++                                                   dl_type=0x0806,
++                                                   priority=10,
++                                                   #dl_dst="%s" % eth_mac,
++                                                   arp_tpa="%s" % val,
++                                                   actions="resubmit(,%s)" % constants.ARP_RESPONDER_EXTERNAL)
++
++
++			mac = netaddr.EUI(snat_mac_addr_str, dialect=netaddr.mac_unix)
++        		ip = netaddr.IPAddress(val)
++            		action = ('move:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[],'
++                       		   'mod_dl_src:%(mac)s,'
++                       		   'load:0x2->NXM_OF_ARP_OP[],'
++                       		   'move:NXM_NX_ARP_SHA[]->NXM_NX_ARP_THA[],'
++                       		   'move:NXM_OF_ARP_SPA[]->NXM_OF_ARP_TPA[],'
++                       		   'load:%(mac)#x->NXM_NX_ARP_SHA[],'
++                       		   'load:%(ip)#x->NXM_OF_ARP_SPA[],'
++                       		   'in_port' % {'mac': mac, 'ip': ip})
++
++			self.external_br.add_flow(table=constants.ARP_RESPONDER_EXTERNAL,
++                        		          priority=1,
++                                		  proto='arp',
++                                		  nw_dst='%s' % ip,
++                                		  actions=action)
++
++                        self.external_br.add_flow ( table=constants.ROUTING_AMONGST_VIRTUAL_ROUTERS,
++                                                    priority=5,
++                                                    dl_type=0x0800,
++                                                    vlan_tci="%s/0x0fff"  % lvid,
++                                                    nw_dst="%s" % val,
++                                                    actions="mod_dl_dst:%s,resubmit(,%s)"
++                                                    % ( self.snat_mac[device_id], constants.LEARN_EXTERNAL_SESSION))
++
++                        self.external_br.add_flow ( table=constants.ROUTING_AMONGST_VIRTUAL_ROUTERS,
++                                                    priority=10,
++                                                    dl_type=0x0800,
++                                                    vlan_tci="%s/0x0fff"  % lvid,
++                                                    nw_dst="%s" % val,
++                                                    nw_src="%s" % val, 
++						    actions="drop")
++
++
++        LOG.debug(_("add_snat_router_gateway called over"))
++
+ 
+     def port_update(self, context, **kwargs):
+-        LOG.debug(_("port_update received"))
++        LOG.debug(_("port_update called context: %s"), context)
++        LOG.debug(_("port_update called kwargs: %s"), kwargs)
++
++        LOG.debug(_("port_update called"))
+         port = kwargs.get('port')
+-        # Validate that port is on OVS
++        
++	# Validate that port is on OVS
+         vif_port = self.int_br.get_vif_port_by_id(port['id'])
++        LOG.debug(_("port_update called vif_port: %s"), vif_port)
++
+         if not vif_port:
+             return
+ 
+@@ -306,9 +545,11 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                                                    cfg.CONF.host)
+         except rpc_common.Timeout:
+             LOG.error(_("RPC timeout while updating port %s"), port['id'])
++        LOG.debug(_("port_update called over"))
++
+ 
+     def tunnel_update(self, context, **kwargs):
+-        LOG.debug(_("tunnel_update received"))
++        LOG.debug(_("tunnel_update called: %s"), kwargs)
+         if not self.enable_tunneling:
+             return
+         tunnel_ip = kwargs.get('tunnel_ip')
+@@ -325,17 +566,266 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         if tunnel_ip == self.local_ip:
+             return
+         tun_name = '%s-%s' % (tunnel_type, tunnel_id)
+-        if not self.l2_pop:
+-            self.setup_tunnel_port(tun_name, tunnel_ip, tunnel_type)
++        self.setup_tunnel_port(tun_name, tunnel_ip, tunnel_type)
++	#if not self.l2_pop:
++        #    self.setup_tunnel_port(tun_name, tunnel_ip, tunnel_type)
++        LOG.debug(_("tunnel_update called over"))
++
++
++    def update_integ_br ( self, mac_str, ip_str, lvm, ofport ):
++        LOG.debug(_("update_integ_br called"))
++        lvid=lvm.vlan
++	vlan_ports=lvm.integ_ofports
++
++        LOG.debug(_("add ingress packet flow for new port"))
++        self.int_br.add_flow(table=0,
++                             priority=1,
++                             in_port=ofport,
++			     actions="resubmit(,%s)" %
++                             constants.INT_TO_PATCH)
++ 
++        
++        LOG.debug(_("add vlan translation flow"))
++	self.int_br.add_flow(table=constants.INT_TO_PATCH,
++                              priority=1,
++                              in_port=ofport,
++                              vlan_tci="0x0000",
++			      actions="mod_vlan_vid:%s, resubmit(,%s)" % (lvid, constants.LEARN_FROM_INT))
++	# Packet should be untagged not a VLAN Tag of 0
++        
++        LOG.debug(_("add ARP Store flow"))
++	self.int_br.add_flow(table=constants.LOCAL_ARP_STORE,
++                              priority=1,
++                              dl_type=0x0800,
++			      vlan_tci="%s/0x0fff" % lvid,
++                              nw_dst="%s" % ip_str,
++			      actions="mod_dl_dst=%s, resubmit(,%s)" % ( mac_str, constants.UCAST_MCAST_CHECK))
++
++	self.int_br.add_flow(table=constants.FLOOD_TO_INT,
++				reg0="%s" % ofport,
++				priority=1,
++				vlan_tci="%s/0x0fff" % lvid,
++				actions="strip_vlan, output:%s" % ofport )
++	
++        vlan_tagged_ports= ','.join(vlan_ports)
++        LOG.debug(_("vlan_tagged_ports: %s"),vlan_tagged_ports)
++
++        if self.enable_tunneling:
++		self.int_br.add_flow(table=constants.FLOOD_TO_INT,
++                	                reg0=0x0,
++					priority=1,
++                        	        vlan_tci="%s/0x0fff" % lvid,
++                                	actions="output:%s, strip_vlan, output:%s" % (self.patch_tun_ofport, vlan_tagged_ports ))
++	else:
++		self.int_br.add_flow(table=constants.FLOOD_TO_INT,
++                                        reg0=0x0,
++					priority=1,
++                                        vlan_tci="%s/0x0fff" % lvid,
++                                        actions="strip_vlan, output:%s" % vlan_tagged_ports )
++        
++        LOG.debug(_("update_integ_br called over"))
++
++	
++	
++    def _update_routing_entry_integ_br ( self, lvid, mac_str, ip_str, subnet_cidr_str, device_id, network_id ):
++        LOG.debug(_("_update_routing_entry_integ_br called"))
++
++        router_id_str= str(device_id)
++        LOG.debug(_("router_id string  %s"), router_id_str)
+ 
++        if router_id_str in self.router_local_map.keys():
++                router_id=self.router_local_map[router_id_str]
++        else:
++                self.last_used_router_id += 1                           # Currenlty a direct mechanism to generate router_id. This can be optimized like getting VLAN ID's for networks
++                self.router_local_map[router_id_str]=self.last_used_router_id
++                router_id=self.last_used_router_id
++       
++	
++	self.int_br.add_flow(table=constants.DST_SUBNET_GW_MAC,
++                             priority=1,
++                             vlan_tci="%s/0x0fff" % lvid,
++                             dl_dst="%s" % mac_str,
++                             actions="resubmit(,%s)" 
++                             % constants.ROUTING_TABLE_SRC )
++
++        self.int_br.add_flow(table=constants.CHANGE_SOURCE_MAC_TO_INTERNAL,
++                             priority=1,
++                             dl_type=0x0800,
++                             nw_dst="%s" % subnet_cidr_str,
++			     reg2="%s" % router_id,
++                             actions="mod_dl_src:%s, mod_vlan_vid:%s, resubmit(,%s)"
++                             % (mac_str, lvid, constants.DST_SUBNET_GW_MAC ))
++        
++	
++	LOG.debug(_("Subnet CIDR to be added %s"), subnet_cidr_str)
++	router_id_str= str(device_id)
++        LOG.debug(_("router_id string  %s"), router_id_str)
++	
++	self.int_br.add_flow(table=constants.ROUTING_TABLE_SRC,
++                             priority=1,
++                             dl_type=0x0800,
++                             vlan_tci="%s/0x0fff" % lvid,
++                             nw_src="%s" % subnet_cidr_str,
++                             actions="load:%s->NXM_NX_REG1[], resubmit(,%s)"
++			     % ( router_id, constants.ROUTING_TABLE_DST ) )
++
++        self.int_br.add_flow(table=constants.ROUTING_TABLE_DST,
++                             priority=1,
++                             dl_type=0x0800,
++                             nw_dst="%s" % subnet_cidr_str,
++                             reg1="%s" % router_id,
++			     actions="strip_vlan,mod_vlan_vid:%s,mod_dl_src:%s,resubmit(,%s)"
++                             % ( lvid, mac_str, constants.LOCAL_ARP_STORE ) )
++        
++	
++	self.int_br.mod_flow(table=constants.LOCAL_ARP_STORE,
++                             priority=1,
++                             dl_type=0x0800,
++                             vlan_tci="%s/0x0fff" % lvid,
++                             nw_dst="%s" % ip_str,
++                             actions="drop" )
++	LOG.debug(_("_update_routing_entry_integ_br called over"))
++
++	
++    def fip_port_update ( self, context, fixed_ip, floating_ip, fixed_mac, fixed_network_id, floating_network_id, router_id, floatingip_id, floatingip_mac ):
++	# DNAT possible only when router gateway set, hence network is already provisioned here!!
++	LOG.debug(_("fip_port_update called fixed_ip: %s"), fixed_ip)
++        LOG.debug(_("fip_port_update called floating_ip: %s"), floating_ip)
++        LOG.debug(_("fip_port_update called fixed_mac: %s"), fixed_mac)
++        LOG.debug(_("fip_port_update called fixed_network_id: %s"), fixed_network_id)
++        LOG.debug(_("fip_port_update called floating_network_id: %s"), floating_network_id)
++        LOG.debug(_("fip_port_update called router_id: %s"), router_id)
++
++        lvid=self.local_vlan_map[floating_network_id].vlan
++
++	snat_mac=self.snat_mac[router_id]
++        LOG.debug(_("fip_port_update called snat_mac: %s"), snat_mac)
++        LOG.debug(_("fip_port_update called lvid: %s"), lvid)
++
++	eth_mac=floatingip_mac				# floatingip_mac != snat_mac of the router. It is the mac of port in neutron port-list. All DNAT Ports share same link having different IP's
++
++        if self.local_ip != self.network_node_tunnel_ip:
++		return
++
++        LOG.debug(_("fip_port_update called eth_mac: %s"), eth_mac)
++
++	self.external_br.add_flow(table=constants.UPLINK_TO_EXT,
++				  priority=10,
++				  dl_type=0x0800,
++				  dl_dst="%s" % snat_mac,
++				  nw_dst="%s" % floating_ip,
++				  actions="mod_vlan_vid:%s, mod_dl_src:%s, mod_dl_dst:%s,mod_nw_dst:%s, output:%s"
++				  % ( lvid, snat_mac, fixed_mac, fixed_ip, self.patch_tun_ex_ofport_egress)) 
++
++        self.external_br.add_flow(table=constants.SNAT_DNAT_DECISION,
++                                  priority=10,
++                                  dl_type=0x0800,
++                                  dl_dst="%s" % snat_mac,
++				  vlan_tci="%s/0x0fff" % lvid,
++				  nw_src="%s" % fixed_ip,
++                                  actions=" mod_nw_src:%s, mod_dl_src:%s, resubmit(,%s)"
++                                  % ( floating_ip, snat_mac, constants.ROUTING_AMONGST_VIRTUAL_ROUTERS))
++
++       	self.tun_br.add_flow(table=constants.UCAST_FROM_EXTERNAL,
++			     priority=0,
++			     dl_type=0x0800,
++			     vlan_tci="%s/0x0fff" % lvid,
++			     nw_dst="%s" % fixed_ip,
++			     actions="output:%s, resubmit(,%s)" % (self.patch_tun_ofport, constants.FLOOD_TO_TUN))
++
++
++        mac = netaddr.EUI(snat_mac, dialect=netaddr.mac_unix)
++        ip = netaddr.IPAddress(floating_ip)
++        actions = ('move:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[],'
++                   'mod_dl_src:%(mac)s,'
++                   'load:0x2->NXM_OF_ARP_OP[],'
++                   'move:NXM_NX_ARP_SHA[]->NXM_NX_ARP_THA[],'
++                   'move:NXM_OF_ARP_SPA[]->NXM_OF_ARP_TPA[],'
++                   'load:%(mac)#x->NXM_NX_ARP_SHA[],'
++                   'load:%(ip)#x->NXM_OF_ARP_SPA[],'
++                   'in_port' % {'mac': mac, 'ip': ip})
++
++        self.external_br.add_flow(table=constants.ARP_RESPONDER_EXTERNAL,
++                                  priority=1,
++                                  proto='arp',
++                                  nw_dst='%s' % ip,
++                                  actions=actions)
++
++	self.external_br.add_flow ( table=constants.ROUTING_AMONGST_VIRTUAL_ROUTERS,
++                                    priority=5,
++                                    dl_type=0x0800,
++                                    vlan_tci="%s/0x0fff"  % lvid,
++                                    nw_dst="%s" % ip,
++                                    actions="mod_dl_dst:%s,resubmit(,%s)"
++                                    % ( snat_mac, constants.UPLINK_TO_EXT))
++				  
+     def fdb_add(self, context, fdb_entries):
+-        LOG.debug(_("fdb_add received"))
++        LOG.debug(_("fdb_add called fdb_entries: %s"), fdb_entries)
+         for network_id, values in fdb_entries.items():
+-            lvm = self.local_vlan_map.get(network_id)
++            device_owner = values.get('device_owner')
++	    is_external = values.get('router:external')
++	    if is_external == True:
++		LOG.debug(_("External_network port detail. NO need of provisioning local VLAN for external network"))
++		continue
++	    lvm = self.local_vlan_map.get(network_id)
+             if not lvm:
++		# if not managed then manage it, create a local VLAN for the networkID so that we can maintain its ARP_STORE and LOCAL_ARP_STORE
++                net_type=values.get('network_type')
++                seg_id=values.get('segment_id')
++                phys=values.get('physical_network')
++                self.provision_local_vlan(network_id,net_type ,phys ,seg_id )
++                lvm = self.local_vlan_map[network_id]
+                 # Agent doesn't manage any port in this network
+-                continue
++                #continue
++
++
++	    if device_owner == "network:dhcp" and self.local_ip != self.network_node_tunnel_ip:
++		self.add_dhcp_flow(network_id)				# Tap port for a network will come up only once
++
++	    # Get details of ports that are local to this host
+             agent_ports = values.get('ports')
++	    
++	    # Only other_fdb_entries() has port_id as a field - This message has only the details of the new upcoming port + constants.FLODDING_ENTRY
++	    port_uid= values.get('port_id','0')
++	    # Differentiate between other_fdb entries and agent_fdb_entries
++
++            LOG.debug(_("Agent_ports: %s"), agent_ports)
++
++	    if port_uid != "0":						# came from other_fdb_entries. Details about a port
++                LOG.debug(_("Enter testing"))
++                # This if is executed if the fdb_entries belong to other_fdb_entries context and the new port that came up was locacl to this host
++
++                if self.local_ip in agent_ports.keys():
++                        LOG.debug(_("local_ip port detail present that is the new port came up on this host"))
++                        local_ports_list=agent_ports.get(self.local_ip)
++                        LOG.debug(_("local_ip port detail present that is the new port came up on this host"))
++                        LOG.debug(_("local_ports_list in fdb_add %s and port_id %s"),local_ports_list, port_uid)
++                        self.int_br.defer_apply_on()
++                        # local_ports_list is never empty. It has 2 entries- constant.FLOODING_ENTRY and new_port details
++                        for k1 in local_ports_list:
++                                LOG.debug(_("local_port_MAC %s local_port_IP %s"), k1[0], k1[1])
++                                if k1  != q_const.FLOODING_ENTRY:
++                                        LOG.debug(_("local_port_MAC %s local_port_IP %s"), k1[0], k1[1])
++                                        loc_vlan_id=lvm.vlan
++                                        integ_ofport=lvm.vif_ports[port_uid].ofport
++                                        LOG.debug(_("local_port_vlan %s local_port_ofport %s"),loc_vlan_id, integ_ofport)
++                                        lvm.integ_ofports.add(str(integ_ofport))
++                                        self.update_integ_br(k1[0], k1[1], lvm, integ_ofport)   # loc_vlan_id, integ_ofport, lvm.integ_ofports)
++                                        
++                                        
++                                        device_owner= values.get('device_owner')
++                                        device_id= values.get('device_id')
++                                        subnet_cidr= values.get('subnet_cidr')
++                                        LOG.debug(_("device_owner  %s"),device_owner)
++                                        LOG.debug(_("device_id  %s"),device_id)
++                                        LOG.debug(_("subnet_cidr  %s"), subnet_cidr)
++                                        if device_owner == "network:router_interface":
++                                                # The port whoch came up on this host is a router interface / subnet gateway interface on router
++                                                for each_subnet_cidr in subnet_cidr:
++                                                        self._update_routing_entry_integ_br(loc_vlan_id, k1[0], k1[1], each_subnet_cidr, device_id, network_id)
++							self._set_arp_responder('add', loc_vlan_id, k1[0], k1[1])		# ARP responder for local router interface on tunnel
++                        self.int_br.defer_apply_off()
++
+             agent_ports.pop(self.local_ip, None)
+             if len(agent_ports):
+                 self.tun_br.defer_apply_on()
+@@ -351,10 +841,26 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                             continue
+                     for port in ports:
+                         self._add_fdb_flow(port, agent_ip, lvm, ofport)
++                        # local_ports_list is never empty. It has 2 entries- constant.FLOODING_ENTRY and new_port details
++                        if port  != q_const.FLOODING_ENTRY:
++                                LOG.debug(_("local_port_MAC %s local_port_IP %s"), port[0], port[1])
++                                loc_vlan_id=lvm.vlan
++                                device_owner= values.get('device_owner')
++                                device_id= values.get('device_id')
++                                subnet_cidr= values.get('subnet_cidr')
++                                LOG.debug(_("device_owner  %s"),device_owner)
++                                LOG.debug(_("device_id  %s"),device_id)
++                                LOG.debug(_("subnet_cidr  %s"), subnet_cidr)
++                                if device_owner == "network:router_interface":
++                                        # The port whoch came up on this host is a router interface / subnet gateway interface on router
++                                        for each_subnet_cidr in subnet_cidr:
++                                                self._update_routing_entry_integ_br(loc_vlan_id, port[0], port[1], each_subnet_cidr, device_id, network_id)
++
+                 self.tun_br.defer_apply_off()
++        LOG.debug(_("fdb_add called over"))
+ 
+     def fdb_remove(self, context, fdb_entries):
+-        LOG.debug(_("fdb_remove received"))
++        LOG.debug(_("fdb_remove called"))
+         for network_id, values in fdb_entries.items():
+             lvm = self.local_vlan_map.get(network_id)
+             if not lvm:
+@@ -372,8 +878,67 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                     for port in ports:
+                         self._del_fdb_flow(port, agent_ip, lvm, ofport)
+                 self.tun_br.defer_apply_off()
++        LOG.debug(_("fdb_removed called over"))
++
++    def _set_arp_responder(self, action, lvid, mac_str, ip_str):
++        '''Set the ARP respond entry.
++        
++                When the l2 population mechanism driver and OVS supports to edit ARP
++                fields, a table (ARP_RESPONDER) to resolve ARP locally is added to the
++                tunnel bridge.
++
++                :param action: add or remove ARP entry.
++                :param lvid: local VLAN map of network's ARP entry.
++                :param mac_str: MAC string value.
++                :param ip_str: IP string value.
++        '''
++        LOG.debug(_("_set_arp_responder called"))
++
++        mac = netaddr.EUI(mac_str, dialect=netaddr.mac_unix)
++        ip = netaddr.IPAddress(ip_str)
++
++        if action == 'add':
++            actions = ('move:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[],'
++                       'mod_dl_src:%(mac)s,'
++                       'load:0x2->NXM_OF_ARP_OP[],'
++                       'move:NXM_NX_ARP_SHA[]->NXM_NX_ARP_THA[],'
++                       'move:NXM_OF_ARP_SPA[]->NXM_OF_ARP_TPA[],'
++                       'load:%(mac)#x->NXM_NX_ARP_SHA[],'
++                       'load:%(ip)#x->NXM_OF_ARP_SPA[],'
++                       'in_port' % {'mac': mac, 'ip': ip})
++            self.tun_br.add_flow(table=constants.ARP_RESPONDER,
++                                 priority=1,
++                                 proto='arp',
++                                 dl_vlan=lvid,
++                                 nw_dst='%s' % ip,
++                                 actions=actions)
++        else:
++            LOG.warning(_('Action %s not supported'), action)
++        LOG.debug(_("_set_arp_responder called over"))
++
++
++    def _set_arp_store(self, action, lvid, segid,  mac_str, ip_str, of_port):
++        '''
++	Update ARP Cache on BR-INT
++	'''
++	LOG.debug(_("_set_arp_store called"))
++        mac = netaddr.EUI(mac_str, dialect=netaddr.mac_unix)
++        ip = netaddr.IPAddress(ip_str)
++
++        if action == 'add':
++            self.int_br.add_flow(table=constants.LOCAL_ARP_STORE,
++                                 priority=1,
++                                 dl_type=0x0800,
++                                 vlan_tci="%s/0x0fff" % lvid,
++                                 nw_dst="%s" % ip_str,
++                                 actions="mod_dl_dst=%s, resubmit(,%s)" % ( mac_str, constants.UCAST_MCAST_CHECK))
++
++        else:
++            LOG.warning(_('Action %s not supported'), action)
++        LOG.debug(_("_set_arp_store called over"))
+ 
+     def _add_fdb_flow(self, port_info, agent_ip, lvm, ofport):
++        LOG.debug(_("_add_fdb_flow called"))
+         if port_info == q_const.FLOODING_ENTRY:
+             lvm.tun_ofports.add(ofport)
+             ofports = ','.join(lvm.tun_ofports)
+@@ -383,6 +948,8 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                                  actions="strip_vlan,set_tunnel:%s,"
+                                  "output:%s" % (lvm.segmentation_id, ofports))
+         else:
++            self._set_arp_responder('add', lvm.vlan, port_info[0], port_info[1])
++            self._set_arp_store('add',lvm.vlan, lvm.segmentation_id , port_info[0], port_info[1], ofport)
+             # TODO(feleouet): add ARP responder entry
+             self.tun_br.add_flow(table=constants.UCAST_TO_TUN,
+                                  priority=2,
+@@ -390,9 +957,11 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                                  dl_dst=port_info[0],
+                                  actions="strip_vlan,set_tunnel:%s,output:%s" %
+                                  (lvm.segmentation_id, ofport))
++        LOG.debug(_("_add_fdb_flow called over"))
+ 
+     def _del_fdb_flow(self, port_info, agent_ip, lvm, ofport):
+-        if port_info == q_const.FLOODING_ENTRY:
++        return
++	if port_info == q_const.FLOODING_ENTRY:
+             lvm.tun_ofports.remove(ofport)
+             if len(lvm.tun_ofports) > 0:
+                 ofports = ','.join(lvm.tun_ofports)
+@@ -415,13 +984,14 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                                      dl_dst=port_info[0])
+ 
+     def fdb_update(self, context, fdb_entries):
+-        LOG.debug(_("fdb_update received"))
++        LOG.debug(_("fdb_update called"))
+         for action, values in fdb_entries.items():
+             method = '_fdb_' + action
+             if not hasattr(self, method):
+                 raise NotImplementedError()
+ 
+             getattr(self, method)(context, values)
++        LOG.debug(_("fdb_update called over"))
+ 
+     def create_rpc_dispatcher(self):
+         '''Get the rpc dispatcher for this manager.
+@@ -441,6 +1011,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         :param physical_network: the physical network for 'vlan' or 'flat'
+         :param segmentation_id: the VID for 'vlan' or tunnel ID for 'tunnel'
+         '''
++        LOG.debug(_("provision_local_vlan called"))
+ 
+         if not self.available_local_vlans:
+             LOG.error(_("No local VLAN available for net-id=%s"), net_uuid)
+@@ -455,6 +1026,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+ 
+         if network_type in constants.TUNNEL_NETWORK_TYPES:
+             if self.enable_tunneling:
++                self.tun_br.defer_apply_on()
+                 # outbound broadcast/multicast
+                 ofports = ','.join(self.tun_br_ofports[network_type].values())
+                 if ofports:
+@@ -466,11 +1038,22 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                                          (segmentation_id, ofports))
+                 # inbound from tunnels: set lvid in the right table
+                 # and resubmit to Table LEARN_FROM_TUN for mac learning
+-                self.tun_br.add_flow(table=constants.TUN_TABLE[network_type],
+-                                     priority=1,
+-                                     tun_id=segmentation_id,
+-                                     actions="mod_vlan_vid:%s,resubmit(,%s)" %
+-                                     (lvid, constants.LEARN_FROM_TUN))
++	        
++		if self.local_ip != self.network_node_tunnel_ip:
++			self.tun_br.add_flow(table=constants.TUN_TABLE[network_type],
++                        	             priority=1,
++                                	     tun_id=segmentation_id,
++                                     	     actions="mod_vlan_vid:%s,resubmit(,%s)" %
++                                     	     (lvid, constants.LEARN_FROM_TUN))
++		else:
++			self.tun_br.add_flow(table=constants.TUN_TABLE[network_type],
++                                             priority=1,
++                                             tun_id=segmentation_id,
++                                             actions="mod_vlan_vid:%s,resubmit(,%s)" %
++                                             (lvid, constants.EXTERNAL_OR_OVERLAY_FROM_TUN))
++
++			
++                self.tun_br.defer_apply_off()
+             else:
+                 LOG.error(_("Cannot provision %(network_type)s network for "
+                           "net-id=%(net_uuid)s - tunneling disabled"),
+@@ -524,6 +1107,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                         "%(network_type)s for net-id=%(net_uuid)s"),
+                       {'network_type': network_type,
+                        'net_uuid': net_uuid})
++        LOG.debug(_("provision_local_vlan called over"))
+ 
+     def reclaim_local_vlan(self, net_uuid):
+         '''Reclaim a local VLAN.
+@@ -532,6 +1116,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         :param lvm: a LocalVLANMapping object that tracks (vlan, lsw_id,
+             vif_ids) mapping.
+         '''
++
+         lvm = self.local_vlan_map.pop(net_uuid, None)
+         if lvm is None:
+             LOG.debug(_("Network %s not used on agent."), net_uuid)
+@@ -547,10 +1132,12 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                     table=constants.TUN_TABLE[lvm.network_type],
+                     tun_id=lvm.segmentation_id)
+                 self.tun_br.delete_flows(dl_vlan=lvm.vlan)
+-                if self.l2_pop:
++                '''
++		if self.l2_pop:
+                     # Try to remove tunnel ports if not used by other networks
+                     for ofport in lvm.tun_ofports:
+                         self.cleanup_tunnel_port(ofport, lvm.network_type)
++		'''
+         elif lvm.network_type == constants.TYPE_FLAT:
+             if lvm.physical_network in self.phys_brs:
+                 # outbound
+@@ -595,6 +1182,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         :param physical_network: the physical network for 'vlan' or 'flat'
+         :param segmentation_id: the VID for 'vlan' or tunnel ID for 'tunnel'
+         '''
++        LOG.debug(_("port_bound called"))
+         if net_uuid not in self.local_vlan_map:
+             self.provision_local_vlan(net_uuid, network_type,
+                                       physical_network, segmentation_id)
+@@ -603,8 +1191,10 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+ 
+         self.int_br.set_db_attribute("Port", port.port_name, "tag",
+                                      str(lvm.vlan))
+-        if int(port.ofport) != -1:
+-            self.int_br.delete_flows(in_port=port.ofport)
++        #if int(port.ofport) != -1:
++        #    self.int_br.delete_flows(in_port=port.ofport)
++        LOG.debug(_("port_bound called over"))
++
+ 
+     def port_unbound(self, vif_id, net_uuid=None):
+         '''Unbind port.
+@@ -639,7 +1229,9 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         self.int_br.add_flow(priority=2, in_port=port.ofport, actions="drop")
+ 
+     def setup_integration_br(self):
+-        '''Setup the integration bridge.
++        LOG.debug(_("setup_integ_br called"))
++        # Assumed br-int already existant
++	'''Setup the integration bridge.
+ 
+         Create patch ports and remove all existing flows.
+ 
+@@ -649,7 +1241,91 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         self.int_br.delete_port(cfg.CONF.OVS.int_peer_patch_port)
+         self.int_br.remove_all_flows()
+         # switch all traffic using L2 learning
+-        self.int_br.add_flow(priority=1, actions="normal")
++        # self.int_br.add_flow(priority=1, actions="normal")
++        LOG.debug(_("setup_integ_br called over"))
++
++    def initialize_integ_br (self ):
++        # Table 0 (default) will sort incoming traffic depending on in_port
++        LOG.debug(_("initialize_integ_br called"))
++        
++        if self.enable_tunneling:
++                self.int_br.add_flow(table=0,
++                                     priority=1,
++                                     in_port=self.patch_tun_ofport,
++                                     actions="resubmit(,%s)" %
++                                     constants.LEARN_FROM_INT)
++        self.int_br.add_flow(table=0, priority=0, actions="drop")
++        # INT_TO_PATCH table will handle packets coming from various ports other than patch-tun port on Integration Bridge
++        self.int_br.add_flow(table=constants.INT_TO_PATCH, priority=0, actions="drop")
++
++        # UCAST_MCAST_CHECK decides if the packet is unicast then send it to LEARN_FROM_INT else to FLOOD_TO_INT for flooding
++        self.int_br.add_flow(table=constants.UCAST_MCAST_CHECK,
++                             dl_dst="00:00:00:00:00:00/01:00:00:00:00:00",
++                             actions="resubmit(,%s), resubmit(,%s)" % (constants.UCAST_TO_INT, constants.FLOOD_TO_INT))
++        
++        LOG.debug(_("UCAST_MCAST check flow being added"))
++        self.int_br.add_flow(table=constants.UCAST_MCAST_CHECK,
++                             dl_dst="01:00:00:00:00:00/01:00:00:00:00:00",
++                             actions="resubmit(,%s)" % constants.FLOOD_TO_INT)
++        # LEARN_FROM_TUN table will have a single flow using a learn action to
++        # dynamically set-up flows in UCAST_TO_INT corresponding to remote mac
++        # adresses
++        learned_flow = ("table=%s,"
++                        "priority=1,"
++                        "hard_timeout=100,"
++                        "NXM_OF_VLAN_TCI[0..11],"
++                        "NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],"
++                        "load:NXM_OF_IN_PORT[]->NXM_NX_REG0[0..15]"
++                        % constants.UCAST_TO_INT)
++        # Once remote mac adresses are learnt, packet is outputed to patch_int
++        LOG.debug(_("LEARN_FROM_INT flow being added"))
++        self.int_br.add_flow(table=constants.LEARN_FROM_INT,
++                             priority=1,
++                             actions="learn(%s), resubmit(,%s)" %
++                             (learned_flow, constants.PACKET_FROM_EXTERNAL))
++        # FLOOD_TO_INT will handle flooding in tunnels based on lvid,
++        # for now, add a default drop action
++        
++        self.int_br.add_flow(table=constants.PACKET_FROM_EXTERNAL,
++                             priority=0,
++                             actions="resubmit(,%s)" %
++                             (constants.DST_SUBNET_GW_MAC))
++
++        self.int_br.add_flow(table=constants.CHANGE_SOURCE_MAC_TO_INTERNAL,
++                             priority=0,
++                             actions="drop" )
++
++        
++	
++	if self.enable_tunneling:
++                self.int_br.add_flow(table=constants.FLOOD_TO_INT,
++                                     reg0="%s" % self.patch_tun_ofport,
++                                     actions="output:%s" 
++                                     % self.patch_tun_ofport )
++        
++        self.int_br.add_flow(table=constants.DST_SUBNET_GW_MAC,
++                             priority=10,
++                             dl_dst="01:00:00:00:00:00/01:00:00:00:00:00",
++			     actions="resubmit(,%s)" % constants.FLOOD_TO_INT)
++
++        self.int_br.add_flow(table=constants.DST_SUBNET_GW_MAC,
++                             priority=0,
++                             actions="resubmit(,%s)" % constants.UCAST_MCAST_CHECK)
++
++        self.int_br.add_flow(table=constants.ROUTING_TABLE_SRC,
++                             priority=0,
++                             actions="drop")
++
++        self.int_br.add_flow(table=constants.ROUTING_TABLE_DST,
++                             priority=0,
++                             actions="resubmit(,%s)" % constants.EXTERNAL_ROUTING)
++
++        self.int_br.add_flow(table=constants.EXTERNAL_ROUTING,
++                             priority=0,
++                             actions="drop")
++
++	LOG.debug(_("initialize_integ_br called over"))
++
+ 
+     def setup_ancillary_bridges(self, integ_br, tun_br):
+         '''Setup ancillary bridges - for example br-ex.'''
+@@ -677,6 +1353,42 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+             ancillary_bridges.append(br)
+         return ancillary_bridges
+ 
++    def setup_external_bridge ( self, ext_br ):
++	'''
++	Setup external bridge
++	'''
++        # Bridge already configured by user like in case of BR-EXT
++	self.external_br = ovs_lib.OVSBridge(ext_br, self.root_helper)		# This function just creates an object of class representing external bridge
++	# RIGHT NOW MANUALLY ADD UPLINK. We need to add SCRIPT in /etc/sysconfig/network-interfaces : ifcfg-<up_link_name>
++	# self.external_br.reset_bridge()					# This was the step that was actually creating new bridge and destroying the old
++
++	patch1_name = "patch-tunbr"
++	patch2_name = "patch-extbr"
++	self.patch_ext_ofport = self.tun_br.add_patch_port(
++            patch1_name, patch2_name)
++        self.patch_tun_ex_ofport = self.external_br.add_patch_port(
++            patch2_name, patch1_name)
++        if int(self.patch_tun_ex_ofport) < 0 or int(self.patch_ext_ofport) < 0:
++            LOG.error(_("Failed to create OVS patch port. Cannot have "
++                        "external bridge linking on the tunnel "
++                        "Agent terminated!"))
++            exit(1)
++
++        patch1_name = "patch-tunbr_egress"
++        patch2_name = "patch-extbr_ingress"
++        self.patch_ext_ofport_ingress = self.tun_br.add_patch_port(
++            patch1_name, patch2_name)
++        self.patch_tun_ex_ofport_egress = self.external_br.add_patch_port(
++            patch2_name, patch1_name)
++        if int(self.patch_tun_ex_ofport_egress) < 0 or int(self.patch_ext_ofport_ingress) < 0:
++            LOG.error(_("Failed to create OVS patch port. Cannot have "
++                        "external bridge linking on the tunnel "
++                        "Agent terminated!"))
++            exit(1)
++
++        self.external_br.remove_all_flows()
++
++
+     def setup_tunnel_br(self, tun_br):
+         '''Setup the tunnel bridge.
+ 
+@@ -707,51 +1419,227 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         self.tun_br.add_flow(priority=0, actions="drop")
+         # PATCH_LV_TO_TUN table will handle packets coming from patch_int
+         # unicasts go to table UCAST_TO_TUN where remote adresses are learnt
+-        self.tun_br.add_flow(table=constants.PATCH_LV_TO_TUN,
+-                             dl_dst="00:00:00:00:00:00/01:00:00:00:00:00",
+-                             actions="resubmit(,%s)" % constants.UCAST_TO_TUN)
++        
++	if self.local_ip != self.network_node_tunnel_ip:
++	        self.tun_br.add_flow(table=constants.PATCH_LV_TO_TUN,
++        	                     priority=0,
++				     dl_dst="00:00:00:00:00:00/01:00:00:00:00:00",
++                	             actions="resubmit(,%s)" % constants.UCAST_TO_TUN)
++	else:
++                self.tun_br.add_flow(table=constants.PATCH_LV_TO_TUN,
++                                     priority=0,
++				     dl_dst="00:00:00:00:00:00/01:00:00:00:00:00",
++                                     actions="resubmit(,%s)" % constants.EXTERNAL_OR_OVERLAY_FROM_INT)
++	
+         # Broadcasts/multicasts go to table FLOOD_TO_TUN that handles flooding
+-        self.tun_br.add_flow(table=constants.PATCH_LV_TO_TUN,
+-                             dl_dst="01:00:00:00:00:00/01:00:00:00:00:00",
++        
++	self.tun_br.add_flow(table=constants.PATCH_LV_TO_TUN,
++                             priority=0,
++			     dl_dst="01:00:00:00:00:00/01:00:00:00:00:00",
+                              actions="resubmit(,%s)" % constants.FLOOD_TO_TUN)
++
++        self.tun_br.add_flow(table=constants.PATCH_LV_TO_TUN,
++                             priority=1,
++			     dl_type=0x0806,
++			     nw_proto=1,			# ARP Request
++                             actions="resubmit(,%s)" % constants.ARP_RESPONDER)
++
++
++        self.tun_br.add_flow(table=constants.ARP_RESPONDER,
++                             priority=0,
++                             dl_type=0x0806,
++			     actions="resubmit(,%s)" % constants.FLOOD_TO_TUN)
++
++
+         # Tables [tunnel_type]_TUN_TO_LV will set lvid depending on tun_id
+         # for each tunnel type, and resubmit to table LEARN_FROM_TUN where
+         # remote mac adresses will be learnt
+-        for tunnel_type in constants.TUNNEL_NETWORK_TYPES:
++        
++	for tunnel_type in constants.TUNNEL_NETWORK_TYPES:
+             self.tun_br.add_flow(table=constants.TUN_TABLE[tunnel_type],
+                                  priority=0,
+                                  actions="drop")
++
++        if self.local_ip == self.network_node_tunnel_ip:
++        	self.tun_br.add_flow(table=constants.EXTERNAL_OR_OVERLAY_FROM_TUN,
++                                     priority=0,
++                                     actions="resubmit(,%s)" %
++                                     constants.LEARN_FROM_TUN)
++                self.tun_br.add_flow(table=constants.EXTERNAL_OR_OVERLAY_FROM_INT,
++                                     priority=0,
++                                     actions="resubmit(,%s)" %
++                                     constants.UCAST_TO_TUN)
++	
++
+         # LEARN_FROM_TUN table will have a single flow using a learn action to
+         # dynamically set-up flows in UCAST_TO_TUN corresponding to remote mac
+         # adresses (assumes that lvid has already been set by a previous flow)
+-        learned_flow = ("table=%s,"
++        learned_flow_ip = ("table=%s,"
+                         "priority=1,"
+-                        "hard_timeout=300,"
++                        "dl_type=0x0800,"
++                        "hard_timeout=100,"
+                         "NXM_OF_VLAN_TCI[0..11],"
+                         "NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],"
++                        "NXM_OF_IP_DST[]=NXM_OF_IP_SRC[],"
+                         "load:0->NXM_OF_VLAN_TCI[],"
+                         "load:NXM_NX_TUN_ID[]->NXM_NX_TUN_ID[],"
+                         "output:NXM_OF_IN_PORT[]" %
+                         constants.UCAST_TO_TUN)
++
++        learned_flow_arp = ("table=%s,"
++                        "priority=2,"
++                        "dl_type=0x0806,"
++                        "hard_timeout=100,"
++                        "NXM_OF_VLAN_TCI[0..11],"
++                        "NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],"
++                        "NXM_OF_ARP_TPA[]=NXM_OF_ARP_SPA[],"
++                        "load:0->NXM_OF_VLAN_TCI[],"
++                        "load:NXM_NX_TUN_ID[]->NXM_NX_TUN_ID[],"
++                        "output:NXM_OF_IN_PORT[]" %
++                        constants.UCAST_TO_TUN)
++
+         # Once remote mac adresses are learnt, packet is outputed to patch_int
+         self.tun_br.add_flow(table=constants.LEARN_FROM_TUN,
+                              priority=1,
++                             dl_type=0x0800,
++                             actions="learn(%s),output:%s" %
++                             (learned_flow_ip, self.patch_int_ofport))
++        self.tun_br.add_flow(table=constants.LEARN_FROM_TUN,
++                             priority=1,
++                             dl_type=0x0806,
+                              actions="learn(%s),output:%s" %
+-                             (learned_flow, self.patch_int_ofport))
++                             (learned_flow_arp, self.patch_int_ofport))
++
+         # Egress unicast will be handled in table UCAST_TO_TUN, where remote
+         # mac adresses will be learned. For now, just add a default flow that
+         # will resubmit unknown unicasts to table FLOOD_TO_TUN to treat them
+         # as broadcasts/multicasts
+-        self.tun_br.add_flow(table=constants.UCAST_TO_TUN,
+-                             priority=0,
+-                             actions="resubmit(,%s)" %
+-                             constants.FLOOD_TO_TUN)
++
++        if self.local_ip != self.network_node_tunnel_ip:
++                # For compute nodes we use table EXTERNAL_ROUTING_TUN
++                self.tun_br.add_flow(table=constants.UCAST_TO_TUN,
++                                     priority=0,
++                                     actions="resubmit(,%s)" %
++                                     constants.EXTERNAL_ROUTING_TUN)
++
++                self.tun_br.add_flow(table=constants.EXTERNAL_ROUTING_TUN,
++                                     priority=0,
++                                     actions="resubmit(,%s)" %
++                                     constants.FLOOD_TO_TUN)
++        else:
++                # For network/controller node the table / flow changed
++                self.tun_br.add_flow(table=constants.UCAST_TO_TUN,
++                                     priority=0,
++                                     actions="resubmit(,%s)" %
++                                     constants.FLOOD_TO_TUN)
++
++
+         # FLOOD_TO_TUN will handle flooding in tunnels based on lvid,
+         # for now, add a default drop action
+         self.tun_br.add_flow(table=constants.FLOOD_TO_TUN,
+                              priority=0,
+                              actions="drop")
+ 
++    def initialize_tun_ext_link(self):
++	self.up_link_ofport = self.external_br.add_port(self.eth_if)
++	# Assume that config file is already configured
++	learned_flow_ip = ( "table=%s,"
++			    "priority=1,"
++                            "hard_timeout=100,"
++			    "NXM_OF_VLAN_TCI[0..11],"
++			    "NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],"
++			    "dl_type=0x800,"
++			    "NXM_OF_IP_DST[]=NXM_OF_IP_SRC[],"
++			    "load:0->NXM_OF_VLAN_TCI[],"
++			    "load:NXM_NX_TUN_ID[]->NXM_NX_TUN_ID[],"
++			    "output:NXM_OF_IN_PORT[]" % constants.UCAST_FROM_EXTERNAL )
++
++	self.tun_br.add_flow(table=constants.EXTERNAL_LEARN_FROM_TUN,
++			     priority=1,
++			     dl_type=0x0800,
++			     actions="learn(%s), output:%s" % 
++			     ( learned_flow_ip, self.patch_ext_ofport) )
++	learned_flow_arp = ( "table=%s,"
++			     "priority=1,"
++                             "hard_timeout=100,"
++			     "NXM_OF_VLAN_TCI[0..11],"
++			     "NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],"
++			     "dl_type=0x806,"
++			     "NXM_OF_ARP_TPA[]=NXM_OF_ARP_SPA[],"
++		  	     "load:0->NXM_OF_VLAN_TCI[],"
++			     "load:NXM_NX_TUN_ID[]->NXM_NX_TUN_ID[],"
++			     "output:NXM_OF_IN_PORT[]" % constants.UCAST_FROM_EXTERNAL )
++
++	self.tun_br.add_flow(table=constants.EXTERNAL_LEARN_FROM_TUN,
++		   	     priority=1,
++			     dl_type=0x0806,
++			     actions="learn(%s), output:%s" % 
++			     ( learned_flow_arp, self.patch_ext_ofport) )	
++
++	learned_flow_ip = ( "table=%s,"
++		   	    "priority=1,"
++                            "hard_timeout=100,"
++			    "NXM_OF_VLAN_TCI[0..11],"
++			    "NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],"
++			    "dl_type=0x800,"
++			    "NXM_OF_IP_DST[]=NXM_OF_IP_SRC[],"
++			    "output:NXM_OF_IN_PORT[]" % constants.UCAST_FROM_EXTERNAL )
++
++	self.tun_br.add_flow(table=constants.EXTERNAL_LEARN_FROM_INT,
++		 	     priority=1,
++			     dl_type=0x0800,
++			     actions="learn(%s), output:%s" % 
++			     ( learned_flow_ip, self.patch_ext_ofport)) 
++
++	learned_flow_arp = ( "table=%s,"
++			     "priority=1,"
++                             "hard_timeout=100,"
++			     "NXM_OF_VLAN_TCI[0..11],"
++			     "NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],"
++			     "dl_type=0x806,"
++			     "NXM_OF_ARP_TPA[]=NXM_OF_ARP_SPA[],"
++			     "output:NXM_OF_IN_PORT[]" % constants.UCAST_FROM_EXTERNAL )
++	
++	self.tun_br.add_flow(table=constants.EXTERNAL_LEARN_FROM_INT,
++			     priority=1,
++	 		     dl_type=0x0806,
++		     	     actions="learn(%s), output:%s" % 
++		     	     ( learned_flow_arp, self.patch_ext_ofport))
++
++	self.external_br.add_flow( priority=0,
++				   actions="NORMAL")
++
++        self.external_br.add_flow( priority=2,
++                                   dl_type=0x0800,
++				   nw_proto=1,
++				   actions="drop")			# Currently we dont support ping to external network
++
++        self.external_br.add_flow( priority=1,
++                                   in_port="%s" % self.patch_tun_ex_ofport,
++				   actions="load:%s->NXM_NX_REG0[],resubmit(,%s)" % (self.patch_tun_ex_ofport_egress, constants.SNAT_DNAT_DECISION))
++
++	self.external_br.add_flow( priority=1,
++                                   in_port="%s" % self.up_link_ofport,
++                                   actions="resubmit(,%s)" % constants.UPLINK_TO_EXT)
++
++        self.external_br.add_flow( table=constants.SNAT_DNAT_DECISION,
++				   priority=0,
++                                   actions="drop") 
++
++        self.external_br.add_flow( table=constants.UPLINK_TO_EXT,
++				   priority=0,
++                                   actions="NORMAL")
++
++
++        self.external_br.add_flow( table=constants.ARP_RESPONDER_EXTERNAL,
++                                   priority=0,
++                                   actions="NORMAL")
++
++        self.external_br.add_flow( table=constants.ROUTING_AMONGST_VIRTUAL_ROUTERS,
++                                   priority=0,
++                                   actions="strip_vlan, resubmit(,%s)" % constants.EXTERNAL_NETWORK_ARP_CACHE)
++	
++
+     def setup_physical_bridges(self, bridge_mappings):
+         '''Setup the physical network bridges.
+ 
+@@ -816,6 +1704,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                 phys_veth.link.set_mtu(self.veth_mtu)
+ 
+     def update_ports(self, registered_ports):
++        LOG.debug(_("update_ports called"))
+         ports = self.int_br.get_vif_port_set()
+         if ports == registered_ports:
+             return
+@@ -825,6 +1714,8 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         return {'current': ports,
+                 'added': added,
+                 'removed': removed}
++        LOG.debug(_("update_ports called over"))
++
+ 
+     def update_ancillary_ports(self, registered_ports):
+         ports = set()
+@@ -841,6 +1732,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+ 
+     def treat_vif_port(self, vif_port, port_id, network_id, network_type,
+                        physical_network, segmentation_id, admin_state_up):
++        LOG.debug(_("treat_vif_port called"))
+         if vif_port:
+             if admin_state_up:
+                 self.port_bound(vif_port, network_id, network_type,
+@@ -849,6 +1741,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                 self.port_dead(vif_port)
+         else:
+             LOG.debug(_("No VIF port for port %s defined on agent."), port_id)
++        LOG.debug(_("treat_vif_ports called over"))
+ 
+     def setup_tunnel_port(self, port_name, remote_ip, tunnel_type):
+         ofport = self.tun_br.add_tunnel_port(port_name,
+@@ -897,6 +1790,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                     self.tun_br_ofports[tunnel_type].pop(remote_ip, None)
+ 
+     def treat_devices_added(self, devices):
++        LOG.debug(_("treat_devices_added called"))
+         resync = False
+         self.sg_agent.prepare_devices_filter(devices)
+         for device in devices:
+@@ -931,9 +1825,11 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                 LOG.debug(_("Device %s not defined on plugin"), device)
+                 if (port and int(port.ofport) != -1):
+                     self.port_dead(port)
++        LOG.debug(_("treat_devices_added called over"))
+         return resync
+ 
+     def treat_ancillary_devices_added(self, devices):
++        LOG.debug(_("treat_ancillary_devices_added called"))
+         resync = False
+         for device in devices:
+             LOG.info(_("Ancillary Port %s added"), device)
+@@ -953,6 +1849,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                                              self.agent_id,
+                                              cfg.CONF.host)
+         return resync
++        LOG.debug(_("treat_ancillary_devices_added called over"))
+ 
+     def treat_devices_removed(self, devices):
+         resync = False
+@@ -994,6 +1891,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         return resync
+ 
+     def process_network_ports(self, port_info):
++        LOG.debug(_("process_network_ports called"))
+         resync_a = False
+         resync_b = False
+         if 'added' in port_info:
+@@ -1001,6 +1899,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         if 'removed' in port_info:
+             resync_b = self.treat_devices_removed(port_info['removed'])
+         # If one of the above opertaions fails => resync with plugin
++        LOG.debug(_("process_network_ports called over"))
+         return (resync_a | resync_b)
+ 
+     def process_ancillary_network_ports(self, port_info):
+@@ -1021,7 +1920,9 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                 details = self.plugin_rpc.tunnel_sync(self.context,
+                                                       self.local_ip,
+                                                       tunnel_type)
+-                if not self.l2_pop:
++                LOG.debug(_("tunnel_sync details: %s"),details)
++                '''
++		if not self.l2_pop:
+                     tunnels = details['tunnels']
+                     for tunnel in tunnels:
+                         if self.local_ip != tunnel['ip_address']:
+@@ -1030,6 +1931,19 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                             self.setup_tunnel_port(tun_name,
+                                                    tunnel['ip_address'],
+                                                    tunnel_type)
++
++                '''
++		tunnels = details['tunnels']
++                #tunnels.append( {'ip_address': '192.168.122.158', 'udp_port': 4789})
++		for tunnel in tunnels:
++                    if self.local_ip != tunnel['ip_address']:
++                        tunnel_id = tunnel.get('id', tunnel['ip_address'])
++                        tun_name = '%s-%s' % (tunnel_type, tunnel_id)
++                        self.setup_tunnel_port(tun_name,
++                                               tunnel['ip_address'],
++                                               tunnel_type)
++
++
+         except Exception as e:
+             LOG.debug(_("Unable to sync tunnel IP %(local_ip)s: %(e)s"),
+                       {'local_ip': self.local_ip, 'e': e})
+@@ -1151,7 +2065,13 @@ def create_agent_config_map(config):
+         tunnel_types=config.AGENT.tunnel_types,
+         veth_mtu=config.AGENT.veth_mtu,
+         l2_population=config.AGENT.l2_population,
++        ext_br=config.OVS.external_bridge,
++        network_node_tunnel_ip=config.OVS.network_node_tunnel_ip,
++	ext_if=config.OVS.external_interface,
+     )
++    LOG.debug(_("INIPARSER- %s"), config.OVS.external_bridge)
++    LOG.debug(_("INIPARSER- %s"), config.OVS.network_node_tunnel_ip)
++    LOG.debug(_("INIPARSER- %s"), config.OVS.external_interface)
+ 
+     # If enable_tunneling is TRUE, set tunnel_type to default to GRE
+     if config.OVS.enable_tunneling and not kwargs['tunnel_types']:
+diff -rupN old/neutron/plugins/openvswitch/common/config.py new/neutron/plugins/openvswitch/common/config.py
+--- old/neutron/plugins/openvswitch/common/config.py	2014-10-31 13:06:09.000000000 +0530
++++ new/neutron/plugins/openvswitch/common/config.py	2014-10-31 13:06:09.000000000 +0530
+@@ -56,6 +56,14 @@ ovs_opts = [
+     cfg.StrOpt('tunnel_type', default='',
+                help=_("The type of tunnels to use when utilizing tunnels, "
+                       "either 'gre' or 'vxlan'")),
++
++    cfg.StrOpt('external_bridge', default='br-ex',
++               help=_("External bridge to use")),
++    cfg.StrOpt('network_node_tunnel_ip', default='',
++               help=_("Tunnel IP of network node")),
++    cfg.StrOpt('external_interface', default='eth0',
++               help=_("External network up-link for external bridge")),
++
+ ]
+ 
+ agent_opts = [
+diff -rupN old/neutron/plugins/openvswitch/common/constants.py new/neutron/plugins/openvswitch/common/constants.py
+--- old/neutron/plugins/openvswitch/common/constants.py	2014-10-31 13:06:09.000000000 +0530
++++ new/neutron/plugins/openvswitch/common/constants.py	2014-10-31 13:06:09.000000000 +0530
+@@ -43,8 +43,40 @@ TUNNEL_NETWORK_TYPES = [TYPE_GRE, TYPE_V
+ PATCH_LV_TO_TUN = 1
+ GRE_TUN_TO_LV = 2
+ VXLAN_TUN_TO_LV = 3
+-LEARN_FROM_TUN = 10
+-UCAST_TO_TUN = 20
+-FLOOD_TO_TUN = 21
++LEARN_FROM_TUN = 50
++EXTERNAL_LEARN_FROM_TUN = 51
++EXTERNAL_LEARN_FROM_INT = 52
++UCAST_TO_TUN = 60
++UCAST_FROM_EXTERNAL = 61
++FLOOD_TO_TUN = 22
+ # Map tunnel types to tables number
+ TUN_TABLE = {TYPE_GRE: GRE_TUN_TO_LV, TYPE_VXLAN: VXLAN_TUN_TO_LV}
++ARP_RESPONDER=21
++ARP_STORE=23
++EXTERNAL_ROUTING_TUN = 25
++FLOOD_TO_CONTROLLER = 31
++EXTERNAL_OR_OVERLAY_FROM_INT = 12
++EXTERNAL_OR_OVERLAY_FROM_TUN = 11
++
++INT_TO_PATCH = 1
++LEARN_FROM_INT = 10
++UCAST_MCAST_CHECK = 2
++UCAST_TO_INT = 20
++FLOOD_TO_INT = 21
++LOCAL_ARP_STORE=40
++DST_SUBNET_GW_MAC = 3
++ROUTING_TABLE_SRC = 30
++ROUTING_TABLE_DST = 35
++EXTERNAL_ROUTING = 50
++PACKET_FROM_EXTERNAL = 4
++CHANGE_SOURCE_MAC_TO_INTERNAL = 5
++
++
++# EXT bridge
++SNAT_DNAT_DECISION = 30
++ROUTING_EXTERNAL_NETWORK = 31
++EXTERNAL_NETWORK_ARP_CACHE = 20
++LEARN_EXTERNAL_SESSION = 40
++UPLINK_TO_EXT = 50
++ARP_RESPONDER_EXTERNAL=21
++ROUTING_AMONGST_VIRTUAL_ROUTERS = 13
