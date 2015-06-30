@@ -1,0 +1,17 @@
+--- ./neutron/plugins/openvswitch/common/config.py	2014-10-31 13:06:09.000000000 +0530
++++ ./neutron_poc/plugins/openvswitch/common/config.py	2014-10-31 13:06:09.000000000 +0530
+@@ -56,6 +56,14 @@
+     cfg.StrOpt('tunnel_type', default='',
+                help=_("The type of tunnels to use when utilizing tunnels, "
+                       "either 'gre' or 'vxlan'")),
++
++    cfg.StrOpt('external_bridge', default='br-ex',
++               help=_("External bridge to use")),
++    cfg.StrOpt('network_node_tunnel_ip', default='',
++               help=_("Tunnel IP of network node")),
++    cfg.StrOpt('external_interface', default='eth0',
++               help=_("External network up-link for external bridge")),
++
+ ]
+ 
+ agent_opts = [

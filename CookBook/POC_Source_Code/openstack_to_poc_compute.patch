@@ -1,0 +1,1502 @@
+diff -rupN old/neutron/agent/linux/ovs_lib.py new/neutron/agent/linux/ovs_lib.py
+--- old/neutron/agent/linux/ovs_lib.py	2014-10-31 13:06:09.000000000 +0530
++++ new/neutron/agent/linux/ovs_lib.py	2014-10-31 13:06:09.000000000 +0530
+@@ -20,6 +20,9 @@
+ 
+ import re
+ 
++import os
++import commands
++
+ from neutron.agent.linux import ip_lib
+ from neutron.agent.linux import utils
+ from neutron.openstack.common import jsonutils
+@@ -137,15 +140,28 @@ class OVSBridge:
+                    kwargs['dl_type'] or '')
+         dl_vlan = ('dl_vlan' in kwargs and ",dl_vlan=%s" %
+                    kwargs['dl_vlan'] or '')
+-        dl_src = 'dl_src' in kwargs and ",dl_src=%s" % kwargs['dl_src'] or ''
++
++        vlan_tci= ('vlan_tci' in kwargs and ",vlan_tci=%s" %
++                   kwargs['vlan_tci'] or '')
++
++	dl_src = 'dl_src' in kwargs and ",dl_src=%s" % kwargs['dl_src'] or ''
+         dl_dst = 'dl_dst' in kwargs and ",dl_dst=%s" % kwargs['dl_dst'] or ''
+         nw_src = 'nw_src' in kwargs and ",nw_src=%s" % kwargs['nw_src'] or ''
+         nw_dst = 'nw_dst' in kwargs and ",nw_dst=%s" % kwargs['nw_dst'] or ''
+         tun_id = 'tun_id' in kwargs and ",tun_id=%s" % kwargs['tun_id'] or ''
++        # Add support for NXM_NX_REG0[], REG1[], REG2[]
++	reg0 = 'reg0' in kwargs and ",reg0=%s" % kwargs['reg0'] or ''
++        reg1 = 'reg1' in kwargs and ",reg1=%s" % kwargs['reg1'] or ''
++        reg2 = 'reg2' in kwargs and ",reg2=%s" % kwargs['reg2'] or ''
++
+         proto = 'proto' in kwargs and ",%s" % kwargs['proto'] or ''
++        
++        nw_proto = 'nw_proto' in kwargs and ",nw_proto=%s" % kwargs['nw_proto'] or ''
++	
++	tun_id = 'tun_id' in kwargs and ",tun_id=%s" % kwargs['tun_id'] or ''
+         ip = ('nw_src' in kwargs or 'nw_dst' in kwargs) and ',ip' or ''
+-        match = (table + in_port + dl_type + dl_vlan + dl_src + dl_dst +
+-                (proto or ip) + nw_src + nw_dst + tun_id)
++        match = (table + in_port + dl_type + dl_vlan + vlan_tci + reg0 + reg1 + reg2 + dl_src + dl_dst +
++                (proto or ip ) + nw_proto + nw_src + nw_dst + tun_id)
+         if match:
+             match = match[1:]  # strip leading comma
+             flow_expr_arr.append(match)
+@@ -157,17 +173,28 @@ class OVSBridge:
+         if "priority" not in kwargs:
+             kwargs["priority"] = "0"
+ 
++        LOG.debug(_('add_or_mod_flow_str received %s'),kwargs)
+         flow_expr_arr = self._build_flow_expr_arr(**kwargs)
++        LOG.debug(_('flow_expr_arr  %s'),flow_expr_arr)
+         flow_expr_arr.append("actions=%s" % (kwargs["actions"]))
+         flow_str = ",".join(flow_expr_arr)
+         return flow_str
+ 
+     def add_flow(self, **kwargs):
++        LOG.debug(_('add_flow received %s'),kwargs)
+         flow_str = self.add_or_mod_flow_str(**kwargs)
+-        if self.defer_apply_flows:
+-            self.deferred_flows['add'] += flow_str + '\n'
++        '''
++	if self.defer_apply_flows:
++            LOG.debug(_("Defer apply executed not ofctl run"))
++	    self.deferred_flows['add'] += flow_str + '\n'
+         else:
+-            self.run_ofctl("add-flow", [flow_str])
++            LOG.debug(_("Running ofctl command"))
++	    self.run_ofctl("add-flow", [flow_str])
++	'''
++        # remove deffered flows concept. Not handled by POC currently. Directly add flow on call
++	LOG.debug(_("Running ofctl command"))
++        self.run_ofctl("add-flow", [flow_str])
++
+ 
+     def mod_flow(self, **kwargs):
+         flow_str = self.add_or_mod_flow_str(**kwargs)
+@@ -185,6 +212,7 @@ class OVSBridge:
+         if self.defer_apply_flows:
+             self.deferred_flows['del'] += flow_str + '\n'
+         else:
++
+             self.run_ofctl("del-flows", [flow_str])
+ 
+     def defer_apply_on(self):
+@@ -335,6 +363,7 @@ class OVSBridge:
+             LOG.info(_("Unable to parse regex results. Exception: %s"), e)
+             return
+ 
++    
+     def delete_ports(self, all_ports=False):
+         if all_ports:
+             port_names = self.get_port_name_list()
+diff -rupN old/neutron/plugins/openvswitch/agent/ovs_neutron_agent.py new/neutron/plugins/openvswitch/agent/ovs_neutron_agent.py
+--- old/neutron/plugins/openvswitch/agent/ovs_neutron_agent.py	2014-10-31 13:06:09.000000000 +0530
++++ new/neutron/plugins/openvswitch/agent/ovs_neutron_agent.py	2014-10-31 13:47:13.000000000 +0530
+@@ -25,6 +25,8 @@ import distutils.version as dist_version
+ import sys
+ import time
+ 
++import netaddr
++
+ import eventlet
+ from oslo.config import cfg
+ 
+@@ -53,6 +55,8 @@ LOG = logging.getLogger(__name__)
+ 
+ # A placeholder for dead vlans.
+ DEAD_VLAN_TAG = str(q_const.MAX_VLAN_TAG + 1)
++EXTERNAL_DEV_PREFIX = 'qg-'
++DEV_NAME_LEN = 14
+ 
+ 
+ # A class to represent a VIF (i.e., a port that has 'iface-id' and 'vif-mac'
+@@ -70,6 +74,8 @@ class LocalVLANMapping:
+         # set of tunnel ports on which packets should be flooded
+         self.tun_ofports = set()
+ 
++	self.integ_ofports= set()
++
+     def __str__(self):
+         return ("lv-id = %s type = %s phys-net = %s phys-id = %s" %
+                 (self.vlan, self.network_type, self.physical_network,
+@@ -154,8 +160,9 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+ 
+     def __init__(self, integ_br, tun_br, local_ip,
+                  bridge_mappings, root_helper,
++		 ext_br, network_node_tunnel_ip,ext_if,
+                  polling_interval, tunnel_types=None,
+-                 veth_mtu=None, l2_population=False):
++                 veth_mtu=None, l2_population=False ):
+         '''Constructor.
+ 
+         :param integ_br: name of the integration bridge.
+@@ -196,8 +203,14 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         self.local_vlan_map = {}
+         self.tun_br_ofports = {constants.TYPE_GRE: {},
+                                constants.TYPE_VXLAN: {}}
++	self.last_used_router_id=0
++	self.router_local_map= {}
++	self.snat_mac= {}
+ 
++        self.eth_if=ext_if
++	self.network_node_tunnel_ip=network_node_tunnel_ip                        # Currently hard-coded to identify the network node
+         self.polling_interval = polling_interval
++	self.ext_br=ext_br
+ 
+         if tunnel_types:
+             self.enable_tunneling = True
+@@ -209,6 +222,14 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         self._check_ovs_version()
+         if self.enable_tunneling:
+             self.setup_tunnel_br(tun_br)
++            # Without tunneling no external connectivity!
++	    LOG.debug(_("initialize external bridge"))
++            if self.local_ip == self.network_node_tunnel_ip:
++	        self.setup_external_bridge(ext_br)
++		#self.external_br = ovs_lib.OVSBridge(ext_br, self.root_helper)
++	    	self.initialize_tun_ext_link()
++	LOG.debug(_("initialize integ br start"))
++        self.initialize_integ_br()
+         # Collect additional bridges to monitor
+         self.ancillary_brs = self.setup_ancillary_bridges(integ_br, tun_br)
+ 
+@@ -217,6 +238,9 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                                               self.plugin_rpc,
+                                               root_helper)
+ 
++    def port_check(self, context):
++	LOG.debug(_("success!!"))
++
+     def _check_ovs_version(self):
+         if constants.TYPE_VXLAN in self.tunnel_types:
+             check_ovs_version(constants.MINIMUM_OVS_VXLAN_VERSION,
+@@ -267,7 +291,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                 return network_id
+ 
+     def network_delete(self, context, **kwargs):
+-        LOG.debug(_("network_delete received"))
++        LOG.debug(_("network_delete called"))
+         network_id = kwargs.get('network_id')
+         LOG.debug(_("Delete %s"), network_id)
+         # The network may not be defined on this agent
+@@ -276,12 +300,227 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+             self.reclaim_local_vlan(network_id)
+         else:
+             LOG.debug(_("Network %s not used on agent."), network_id)
++        LOG.debug(_("network_delete called over"))
++
++    
++    def get_external_device_name(self, port_id):
++        return (EXTERNAL_DEV_PREFIX + port_id)[:DEV_NAME_LEN]
++    
++
++    def _add_snat_router_gateway ( self, context, **kwargs ):
++        LOG.debug(_("add_snat_router_gateway called"))
++        LOG.debug(_("add_snat_router_gateway called context: %s"), context)
++        LOG.debug(_("add_snat_router_gateway called kwargs: %s"), kwargs)
++	port_context = kwargs.get('port')
++        network_id = port_context['network_id']
++        snat_mac_addr_str= port_context['mac_address']
++        device_owner= port_context['device_owner']
++        device_id= port_context['device_id']
++        snat_ip_str = [tmp['ip_address'] for tmp in port_context['fixed_ips'] ]			# This is a single element list! As router has only one gateway ata time
++
++        router_id_str= str(device_id)
++        LOG.debug(_("router_id string  %s"), router_id_str)
++	self.snat_mac[device_id]=snat_mac_addr_str						# Needed for DNAT port flow add
++	
++        if router_id_str in self.router_local_map.keys():
++   		router_id=self.router_local_map[router_id_str]
++        else:
++                self.last_used_router_id += 1                           # Currenlty a direct mechanism to generate router_id. This can be optimized like getting VLAN ID's for networks
++                self.router_local_map[router_id_str]=self.last_used_router_id
++                router_id=self.last_used_router_id
++
++
++        lvm = self.local_vlan_map.get(network_id)
++        if not lvm:
++                # if not managed then manage it, create a local VLAN for the networkID so that we can maintain its ARP_STORE and LOCAL_ARP_STORE. 
++                net_type=kwargs['network_type']
++                seg_id=kwargs['segmentation_id']
++                phys=kwargs['physical_network']
++                self.provision_local_vlan(network_id,net_type ,phys ,seg_id )
++
++        lvid= self.local_vlan_map[network_id].vlan
++        
++	self.int_br.add_flow(table=constants.EXTERNAL_ROUTING,
++                             priority=1,
++                             reg1="%s" % router_id,
++                             actions="mod_dl_dst:%s, mod_vlan_vid:%s, resubmit(,%s)" % (snat_mac_addr_str, lvid, constants.UCAST_MCAST_CHECK) )
++
++
++	self.int_br.add_flow(table=constants.UCAST_MCAST_CHECK,
++                             priority=1,
++                             dl_type=0x0800,
++                             dl_dst="%s" % snat_mac_addr_str,
++                             vlan_tci="%s/0x0fff"  % lvid,
++                             actions="load:%s->NXM_NX_REG0[], resubmit(,%s)" % (self.patch_tun_ofport, constants.FLOOD_TO_INT))
++
++        self.int_br.add_flow(table=constants.PACKET_FROM_EXTERNAL,
++                             priority=1,
++                             dl_type=0x0800,
++                             dl_src="%s" % snat_mac_addr_str,
++			     vlan_tci="%s/0x0fff"  % lvid,
++                             actions="load:%s->NXM_NX_REG2[], resubmit(,%s)" % (router_id, constants.CHANGE_SOURCE_MAC_TO_INTERNAL))
++
++	if self.local_ip != self.network_node_tunnel_ip:
++                self.tun_br.add_flow(table=constants.EXTERNAL_ROUTING_TUN,
++                                     priority=1,
++                                     dl_type=0x0800,
++                                     dl_dst="%s" % snat_mac_addr_str,
++				     vlan_tci="%s/0x0fff" % lvid,
++                                     actions="resubmit(,%s)" % constants.FLOOD_TO_CONTROLLER)
++
++
++                all_tun_ofports=self.tun_br_ofports[constants.TYPE_VXLAN]
++                LOG.debug(_("tun_br_ofports details: %s"), all_tun_ofports)
++                
++                network_tun_ofport = all_tun_ofports[self.network_node_tunnel_ip]
++                seg_id= self.local_vlan_map[network_id].segmentation_id
++                self.tun_br.add_flow(table=constants.FLOOD_TO_CONTROLLER,
++                                     priority=1,
++                                     dl_type=0x0800,
++                                     vlan_tci="%s/0x0fff" % lvid,
++                                     dl_dst="%s" %  snat_mac_addr_str,
++                                     actions="strip_vlan, set_tunnel:%s, output:%s" % (seg_id, network_tun_ofport))
++
++        else:
++	        self.tun_br.mod_flow(in_port=self.patch_ext_ofport_ingress,
++         	                     priority=1,
++                	             dl_type=0x0800,
++                        	     dl_src="%s" % self.snat_mac[device_id],
++				     vlan_tci="%s/0x0fff" % lvid,
++				     actions="resubmit(,%s)" %
++                             	     constants.UCAST_FROM_EXTERNAL ) 
++
++                self.tun_br.add_flow(table=constants.EXTERNAL_OR_OVERLAY_FROM_TUN, 
++                                     priority=1,
++                                     dl_type=0x0800,
++                                     dl_dst="%s" % snat_mac_addr_str,
++				     vlan_tci="%s/0x0fff" % lvid,
++                                     actions="resubmit(,%s)" % constants.EXTERNAL_LEARN_FROM_TUN)
++
++                self.tun_br.add_flow(table=constants.EXTERNAL_OR_OVERLAY_FROM_INT, 
++                                     priority=1,
++                                     dl_type=0x0800,
++                                     dl_dst="%s" % snat_mac_addr_str,
++                                     vlan_tci="%s/0x0fff" % lvid,
++                                     actions="resubmit(,%s)" % constants.EXTERNAL_LEARN_FROM_INT)
++
++		
++		eth_mac=port_context['mac_address']
++
++		learn_flow_icmp=("table=%s,"
++                       		 "priority=1,"
++                        	 "hard_timeout=100,"
++				 "dl_type=0x0800,"
++                        	 "NXM_OF_IP_PROTO[],"
++				 "NXM_OF_IP_SRC[]=NXM_OF_IP_DST[],"
++				 "NXM_OF_ETH_DST[],"
++				 "load:NXM_OF_VLAN_TCI[0..11]->NXM_OF_VLAN_TCI[0..11],"
++                        	 "load:NXM_OF_IP_SRC[]->NXM_OF_IP_DST[],"
++				 "load:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[],"
++				 "load:NXM_OF_ETH_DST[]->NXM_OF_ETH_SRC[],"
++                        	 "output:NXM_NX_REG0[]" %
++                        	 constants.LEARN_EXTERNAL_SESSION)
++
++                learn_flow_tcp=( "table=%s,"
++                                 "priority=1,"
++                                 "dl_type=0x0800,"
++                                 "hard_timeout=100,"
++                                 "nw_proto=6,"
++				 "NXM_OF_TCP_DST[]=NXM_OF_TCP_SRC[],"
++                                 "NXM_OF_IP_SRC[]=NXM_OF_IP_DST[],"
++                                 "NXM_OF_TCP_SRC[]=NXM_OF_TCP_DST[],"
++                                 "NXM_OF_ETH_DST[],"
++				 "load:NXM_OF_VLAN_TCI[0..11]->NXM_OF_VLAN_TCI[0..11],"
++                                 "load:NXM_OF_IP_SRC[]->NXM_OF_IP_DST[],"
++                                 "load:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[],"
++                                 "load:NXM_OF_ETH_DST[]->NXM_OF_ETH_SRC[],"
++                                 "output:NXM_NX_REG0[]" %
++                                 constants.LEARN_EXTERNAL_SESSION)
++
++		for val in snat_ip_str:									# Single element list
++	 	        LOG.debug(_("snat_ip_str value: %s"), val)
++			
++			self.external_br.add_flow ( table=constants.SNAT_DNAT_DECISION,
++						    priority=5,
++						    dl_type=0x0800,
++						    nw_proto=1,
++					            dl_dst="%s" % snat_mac_addr_str,
++			                            vlan_tci="%s/0x0fff"  % lvid,
++						    actions="learn(%s),mod_nw_src:%s,mod_dl_src:%s,resubmit(,%s)"
++                                                    % ( learn_flow_icmp, val, self.snat_mac[device_id], constants.ROUTING_AMONGST_VIRTUAL_ROUTERS))
++        
++                        self.external_br.add_flow ( table=constants.SNAT_DNAT_DECISION,
++                                                    priority=5,
++                                                    dl_type=0x0800,
++                                                    nw_proto=6,
++                                                    dl_dst="%s" %  snat_mac_addr_str,
++                                                    vlan_tci="%s/0x0fff"  % lvid,
++                                                    actions="learn(%s),mod_nw_src:%s,mod_dl_src:%s,resubmit(,%s)"
++                                                    % ( learn_flow_tcp, val, eth_mac, constants.ROUTING_AMONGST_VIRTUAL_ROUTERS))
++
++        		self.external_br.add_flow( table=constants.UPLINK_TO_EXT,
++						   dl_type=0x0800,
++						   priority=5,
++                        		           dl_dst="%s" % eth_mac,
++						   nw_dst="%s" % val,
++                                                   actions="resubmit(,%s)" % constants.LEARN_EXTERNAL_SESSION )
++
++                        self.external_br.add_flow( table=constants.UPLINK_TO_EXT,
++                                                   dl_type=0x0806,
++                                                   priority=10,
++                                                   #dl_dst="%s" % eth_mac,
++                                                   arp_tpa="%s" % val,
++                                                   actions="resubmit(,%s)" % constants.ARP_RESPONDER_EXTERNAL)
++
++
++			mac = netaddr.EUI(snat_mac_addr_str, dialect=netaddr.mac_unix)
++        		ip = netaddr.IPAddress(val)
++            		action = ('move:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[],'
++                       		   'mod_dl_src:%(mac)s,'
++                       		   'load:0x2->NXM_OF_ARP_OP[],'
++                       		   'move:NXM_NX_ARP_SHA[]->NXM_NX_ARP_THA[],'
++                       		   'move:NXM_OF_ARP_SPA[]->NXM_OF_ARP_TPA[],'
++                       		   'load:%(mac)#x->NXM_NX_ARP_SHA[],'
++                       		   'load:%(ip)#x->NXM_OF_ARP_SPA[],'
++                       		   'in_port' % {'mac': mac, 'ip': ip})
++
++			self.external_br.add_flow(table=constants.ARP_RESPONDER_EXTERNAL,
++                        		          priority=1,
++                                		  proto='arp',
++                                		  nw_dst='%s' % ip,
++                                		  actions=action)
++
++                        self.external_br.add_flow ( table=constants.ROUTING_AMONGST_VIRTUAL_ROUTERS,
++                                                    priority=5,
++                                                    dl_type=0x0800,
++                                                    vlan_tci="%s/0x0fff"  % lvid,
++                                                    nw_dst="%s" % val,
++                                                    actions="mod_dl_dst:%s,resubmit(,%s)"
++                                                    % ( self.snat_mac[device_id], constants.LEARN_EXTERNAL_SESSION))
++
++                        self.external_br.add_flow ( table=constants.ROUTING_AMONGST_VIRTUAL_ROUTERS,
++                                                    priority=10,
++                                                    dl_type=0x0800,
++                                                    vlan_tci="%s/0x0fff"  % lvid,
++                                                    nw_dst="%s" % val,
++                                                    nw_src="%s" % val, 
++						    actions="drop")
++
++
++        LOG.debug(_("add_snat_router_gateway called over"))
++
+ 
+     def port_update(self, context, **kwargs):
+-        LOG.debug(_("port_update received"))
++        LOG.debug(_("port_update called context: %s"), context)
++        LOG.debug(_("port_update called kwargs: %s"), kwargs)
++
++        LOG.debug(_("port_update called"))
+         port = kwargs.get('port')
+-        # Validate that port is on OVS
++        
++	# Validate that port is on OVS
+         vif_port = self.int_br.get_vif_port_by_id(port['id'])
++        LOG.debug(_("port_update called vif_port: %s"), vif_port)
++
+         if not vif_port:
+             return
+ 
+@@ -306,9 +545,11 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                                                    cfg.CONF.host)
+         except rpc_common.Timeout:
+             LOG.error(_("RPC timeout while updating port %s"), port['id'])
++        LOG.debug(_("port_update called over"))
++
+ 
+     def tunnel_update(self, context, **kwargs):
+-        LOG.debug(_("tunnel_update received"))
++        LOG.debug(_("tunnel_update called: %s"), kwargs)
+         if not self.enable_tunneling:
+             return
+         tunnel_ip = kwargs.get('tunnel_ip')
+@@ -325,17 +566,266 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         if tunnel_ip == self.local_ip:
+             return
+         tun_name = '%s-%s' % (tunnel_type, tunnel_id)
+-        if not self.l2_pop:
+-            self.setup_tunnel_port(tun_name, tunnel_ip, tunnel_type)
++        self.setup_tunnel_port(tun_name, tunnel_ip, tunnel_type)
++	#if not self.l2_pop:
++        #    self.setup_tunnel_port(tun_name, tunnel_ip, tunnel_type)
++        LOG.debug(_("tunnel_update called over"))
++
++
++    def update_integ_br ( self, mac_str, ip_str, lvm, ofport ):
++        LOG.debug(_("update_integ_br called"))
++        lvid=lvm.vlan
++	vlan_ports=lvm.integ_ofports
++
++        LOG.debug(_("add ingress packet flow for new port"))
++        self.int_br.add_flow(table=0,
++                             priority=1,
++                             in_port=ofport,
++			     actions="resubmit(,%s)" %
++                             constants.INT_TO_PATCH)
++ 
++        
++        LOG.debug(_("add vlan translation flow"))
++	self.int_br.add_flow(table=constants.INT_TO_PATCH,
++                              priority=1,
++                              in_port=ofport,
++                              vlan_tci="0x0000",
++			      actions="mod_vlan_vid:%s, resubmit(,%s)" % (lvid, constants.LEARN_FROM_INT))
++	# Packet should be untagged not a VLAN Tag of 0
++        
++        LOG.debug(_("add ARP Store flow"))
++	self.int_br.add_flow(table=constants.LOCAL_ARP_STORE,
++                              priority=1,
++                              dl_type=0x0800,
++			      vlan_tci="%s/0x0fff" % lvid,
++                              nw_dst="%s" % ip_str,
++			      actions="mod_dl_dst=%s, resubmit(,%s)" % ( mac_str, constants.UCAST_MCAST_CHECK))
++
++	self.int_br.add_flow(table=constants.FLOOD_TO_INT,
++				reg0="%s" % ofport,
++				priority=1,
++				vlan_tci="%s/0x0fff" % lvid,
++				actions="strip_vlan, output:%s" % ofport )
++	
++        vlan_tagged_ports= ','.join(vlan_ports)
++        LOG.debug(_("vlan_tagged_ports: %s"),vlan_tagged_ports)
++
++        if self.enable_tunneling:
++		self.int_br.add_flow(table=constants.FLOOD_TO_INT,
++                	                reg0=0x0,
++					priority=1,
++                        	        vlan_tci="%s/0x0fff" % lvid,
++                                	actions="output:%s, strip_vlan, output:%s" % (self.patch_tun_ofport, vlan_tagged_ports ))
++	else:
++		self.int_br.add_flow(table=constants.FLOOD_TO_INT,
++                                        reg0=0x0,
++					priority=1,
++                                        vlan_tci="%s/0x0fff" % lvid,
++                                        actions="strip_vlan, output:%s" % vlan_tagged_ports )
++        
++        LOG.debug(_("update_integ_br called over"))
++
++	
++	
++    def _update_routing_entry_integ_br ( self, lvid, mac_str, ip_str, subnet_cidr_str, device_id, network_id ):
++        LOG.debug(_("_update_routing_entry_integ_br called"))
++
++        router_id_str= str(device_id)
++        LOG.debug(_("router_id string  %s"), router_id_str)
+ 
++        if router_id_str in self.router_local_map.keys():
++                router_id=self.router_local_map[router_id_str]
++        else:
++                self.last_used_router_id += 1                           # Currenlty a direct mechanism to generate router_id. This can be optimized like getting VLAN ID's for networks
++                self.router_local_map[router_id_str]=self.last_used_router_id
++                router_id=self.last_used_router_id
++       
++	
++	self.int_br.add_flow(table=constants.DST_SUBNET_GW_MAC,
++                             priority=1,
++                             vlan_tci="%s/0x0fff" % lvid,
++                             dl_dst="%s" % mac_str,
++                             actions="resubmit(,%s)" 
++                             % constants.ROUTING_TABLE_SRC )
++
++        self.int_br.add_flow(table=constants.CHANGE_SOURCE_MAC_TO_INTERNAL,
++                             priority=1,
++                             dl_type=0x0800,
++                             nw_dst="%s" % subnet_cidr_str,
++			     reg2="%s" % router_id,
++                             actions="mod_dl_src:%s, mod_vlan_vid:%s, resubmit(,%s)"
++                             % (mac_str, lvid, constants.DST_SUBNET_GW_MAC ))
++        
++	
++	LOG.debug(_("Subnet CIDR to be added %s"), subnet_cidr_str)
++	router_id_str= str(device_id)
++        LOG.debug(_("router_id string  %s"), router_id_str)
++	
++	self.int_br.add_flow(table=constants.ROUTING_TABLE_SRC,
++                             priority=1,
++                             dl_type=0x0800,
++                             vlan_tci="%s/0x0fff" % lvid,
++                             nw_src="%s" % subnet_cidr_str,
++                             actions="load:%s->NXM_NX_REG1[], resubmit(,%s)"
++			     % ( router_id, constants.ROUTING_TABLE_DST ) )
++
++        self.int_br.add_flow(table=constants.ROUTING_TABLE_DST,
++                             priority=1,
++                             dl_type=0x0800,
++                             nw_dst="%s" % subnet_cidr_str,
++                             reg1="%s" % router_id,
++			     actions="strip_vlan,mod_vlan_vid:%s,mod_dl_src:%s,resubmit(,%s)"
++                             % ( lvid, mac_str, constants.LOCAL_ARP_STORE ) )
++        
++	
++	self.int_br.mod_flow(table=constants.LOCAL_ARP_STORE,
++                             priority=1,
++                             dl_type=0x0800,
++                             vlan_tci="%s/0x0fff" % lvid,
++                             nw_dst="%s" % ip_str,
++                             actions="drop" )
++	LOG.debug(_("_update_routing_entry_integ_br called over"))
++
++	
++    def fip_port_update ( self, context, fixed_ip, floating_ip, fixed_mac, fixed_network_id, floating_network_id, router_id, floatingip_id, floatingip_mac ):
++	# DNAT possible only when router gateway set, hence network is already provisioned here!!
++	LOG.debug(_("fip_port_update called fixed_ip: %s"), fixed_ip)
++        LOG.debug(_("fip_port_update called floating_ip: %s"), floating_ip)
++        LOG.debug(_("fip_port_update called fixed_mac: %s"), fixed_mac)
++        LOG.debug(_("fip_port_update called fixed_network_id: %s"), fixed_network_id)
++        LOG.debug(_("fip_port_update called floating_network_id: %s"), floating_network_id)
++        LOG.debug(_("fip_port_update called router_id: %s"), router_id)
++
++        lvid=self.local_vlan_map[floating_network_id].vlan
++
++	snat_mac=self.snat_mac[router_id]
++        LOG.debug(_("fip_port_update called snat_mac: %s"), snat_mac)
++        LOG.debug(_("fip_port_update called lvid: %s"), lvid)
++
++	eth_mac=floatingip_mac				# floatingip_mac != snat_mac of the router. It is the mac of port in neutron port-list. All DNAT Ports share same link having different IP's
++
++        if self.local_ip != self.network_node_tunnel_ip:
++		return
++
++        LOG.debug(_("fip_port_update called eth_mac: %s"), eth_mac)
++
++	self.external_br.add_flow(table=constants.UPLINK_TO_EXT,
++				  priority=10,
++				  dl_type=0x0800,
++				  dl_dst="%s" % snat_mac,
++				  nw_dst="%s" % floating_ip,
++				  actions="mod_vlan_vid:%s, mod_dl_src:%s, mod_dl_dst:%s,mod_nw_dst:%s, output:%s"
++				  % ( lvid, snat_mac, fixed_mac, fixed_ip, self.patch_tun_ex_ofport_egress)) 
++
++        self.external_br.add_flow(table=constants.SNAT_DNAT_DECISION,
++                                  priority=10,
++                                  dl_type=0x0800,
++                                  dl_dst="%s" % snat_mac,
++				  vlan_tci="%s/0x0fff" % lvid,
++				  nw_src="%s" % fixed_ip,
++                                  actions=" mod_nw_src:%s, mod_dl_src:%s, resubmit(,%s)"
++                                  % ( floating_ip, snat_mac, constants.ROUTING_AMONGST_VIRTUAL_ROUTERS))
++
++       	self.tun_br.add_flow(table=constants.UCAST_FROM_EXTERNAL,
++			     priority=0,
++			     dl_type=0x0800,
++			     vlan_tci="%s/0x0fff" % lvid,
++			     nw_dst="%s" % fixed_ip,
++			     actions="output:%s, resubmit(,%s)" % (self.patch_tun_ofport, constants.FLOOD_TO_TUN))
++
++
++        mac = netaddr.EUI(snat_mac, dialect=netaddr.mac_unix)
++        ip = netaddr.IPAddress(floating_ip)
++        actions = ('move:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[],'
++                   'mod_dl_src:%(mac)s,'
++                   'load:0x2->NXM_OF_ARP_OP[],'
++                   'move:NXM_NX_ARP_SHA[]->NXM_NX_ARP_THA[],'
++                   'move:NXM_OF_ARP_SPA[]->NXM_OF_ARP_TPA[],'
++                   'load:%(mac)#x->NXM_NX_ARP_SHA[],'
++                   'load:%(ip)#x->NXM_OF_ARP_SPA[],'
++                   'in_port' % {'mac': mac, 'ip': ip})
++
++        self.external_br.add_flow(table=constants.ARP_RESPONDER_EXTERNAL,
++                                  priority=1,
++                                  proto='arp',
++                                  nw_dst='%s' % ip,
++                                  actions=actions)
++
++	self.external_br.add_flow ( table=constants.ROUTING_AMONGST_VIRTUAL_ROUTERS,
++                                    priority=5,
++                                    dl_type=0x0800,
++                                    vlan_tci="%s/0x0fff"  % lvid,
++                                    nw_dst="%s" % ip,
++                                    actions="mod_dl_dst:%s,resubmit(,%s)"
++                                    % ( snat_mac, constants.UPLINK_TO_EXT))
++				  
+     def fdb_add(self, context, fdb_entries):
+-        LOG.debug(_("fdb_add received"))
++        LOG.debug(_("fdb_add called fdb_entries: %s"), fdb_entries)
+         for network_id, values in fdb_entries.items():
+-            lvm = self.local_vlan_map.get(network_id)
++            device_owner = values.get('device_owner')
++	    is_external = values.get('router:external')
++	    if is_external == True:
++		LOG.debug(_("External_network port detail. NO need of provisioning local VLAN for external network"))
++		continue
++	    lvm = self.local_vlan_map.get(network_id)
+             if not lvm:
++		# if not managed then manage it, create a local VLAN for the networkID so that we can maintain its ARP_STORE and LOCAL_ARP_STORE
++                net_type=values.get('network_type')
++                seg_id=values.get('segment_id')
++                phys=values.get('physical_network')
++                self.provision_local_vlan(network_id,net_type ,phys ,seg_id )
++                lvm = self.local_vlan_map[network_id]
+                 # Agent doesn't manage any port in this network
+-                continue
++                #continue
++
++
++	    if device_owner == "network:dhcp" and self.local_ip != self.network_node_tunnel_ip:
++		self.add_dhcp_flow(network_id)				# Tap port for a network will come up only once
++
++	    # Get details of ports that are local to this host
+             agent_ports = values.get('ports')
++	    
++	    # Only other_fdb_entries() has port_id as a field - This message has only the details of the new upcoming port + constants.FLODDING_ENTRY
++	    port_uid= values.get('port_id','0')
++	    # Differentiate between other_fdb entries and agent_fdb_entries
++
++            LOG.debug(_("Agent_ports: %s"), agent_ports)
++
++	    if port_uid != "0":						# came from other_fdb_entries. Details about a port
++                LOG.debug(_("Enter testing"))
++                # This if is executed if the fdb_entries belong to other_fdb_entries context and the new port that came up was locacl to this host
++
++                if self.local_ip in agent_ports.keys():
++                        LOG.debug(_("local_ip port detail present that is the new port came up on this host"))
++                        local_ports_list=agent_ports.get(self.local_ip)
++                        LOG.debug(_("local_ip port detail present that is the new port came up on this host"))
++                        LOG.debug(_("local_ports_list in fdb_add %s and port_id %s"),local_ports_list, port_uid)
++                        self.int_br.defer_apply_on()
++                        # local_ports_list is never empty. It has 2 entries- constant.FLOODING_ENTRY and new_port details
++                        for k1 in local_ports_list:
++                                LOG.debug(_("local_port_MAC %s local_port_IP %s"), k1[0], k1[1])
++                                if k1  != q_const.FLOODING_ENTRY:
++                                        LOG.debug(_("local_port_MAC %s local_port_IP %s"), k1[0], k1[1])
++                                        loc_vlan_id=lvm.vlan
++                                        integ_ofport=lvm.vif_ports[port_uid].ofport
++                                        LOG.debug(_("local_port_vlan %s local_port_ofport %s"),loc_vlan_id, integ_ofport)
++                                        lvm.integ_ofports.add(str(integ_ofport))
++                                        self.update_integ_br(k1[0], k1[1], lvm, integ_ofport)   # loc_vlan_id, integ_ofport, lvm.integ_ofports)
++                                        
++                                        
++                                        device_owner= values.get('device_owner')
++                                        device_id= values.get('device_id')
++                                        subnet_cidr= values.get('subnet_cidr')
++                                        LOG.debug(_("device_owner  %s"),device_owner)
++                                        LOG.debug(_("device_id  %s"),device_id)
++                                        LOG.debug(_("subnet_cidr  %s"), subnet_cidr)
++                                        if device_owner == "network:router_interface":
++                                                # The port whoch came up on this host is a router interface / subnet gateway interface on router
++                                                for each_subnet_cidr in subnet_cidr:
++                                                        self._update_routing_entry_integ_br(loc_vlan_id, k1[0], k1[1], each_subnet_cidr, device_id, network_id)
++							self._set_arp_responder('add', loc_vlan_id, k1[0], k1[1])		# ARP responder for local router interface on tunnel
++                        self.int_br.defer_apply_off()
++
+             agent_ports.pop(self.local_ip, None)
+             if len(agent_ports):
+                 self.tun_br.defer_apply_on()
+@@ -351,10 +841,26 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                             continue
+                     for port in ports:
+                         self._add_fdb_flow(port, agent_ip, lvm, ofport)
++                        # local_ports_list is never empty. It has 2 entries- constant.FLOODING_ENTRY and new_port details
++                        if port  != q_const.FLOODING_ENTRY:
++                                LOG.debug(_("local_port_MAC %s local_port_IP %s"), port[0], port[1])
++                                loc_vlan_id=lvm.vlan
++                                device_owner= values.get('device_owner')
++                                device_id= values.get('device_id')
++                                subnet_cidr= values.get('subnet_cidr')
++                                LOG.debug(_("device_owner  %s"),device_owner)
++                                LOG.debug(_("device_id  %s"),device_id)
++                                LOG.debug(_("subnet_cidr  %s"), subnet_cidr)
++                                if device_owner == "network:router_interface":
++                                        # The port whoch came up on this host is a router interface / subnet gateway interface on router
++                                        for each_subnet_cidr in subnet_cidr:
++                                                self._update_routing_entry_integ_br(loc_vlan_id, port[0], port[1], each_subnet_cidr, device_id, network_id)
++
+                 self.tun_br.defer_apply_off()
++        LOG.debug(_("fdb_add called over"))
+ 
+     def fdb_remove(self, context, fdb_entries):
+-        LOG.debug(_("fdb_remove received"))
++        LOG.debug(_("fdb_remove called"))
+         for network_id, values in fdb_entries.items():
+             lvm = self.local_vlan_map.get(network_id)
+             if not lvm:
+@@ -372,8 +878,67 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                     for port in ports:
+                         self._del_fdb_flow(port, agent_ip, lvm, ofport)
+                 self.tun_br.defer_apply_off()
++        LOG.debug(_("fdb_removed called over"))
++
++    def _set_arp_responder(self, action, lvid, mac_str, ip_str):
++        '''Set the ARP respond entry.
++        
++                When the l2 population mechanism driver and OVS supports to edit ARP
++                fields, a table (ARP_RESPONDER) to resolve ARP locally is added to the
++                tunnel bridge.
++
++                :param action: add or remove ARP entry.
++                :param lvid: local VLAN map of network's ARP entry.
++                :param mac_str: MAC string value.
++                :param ip_str: IP string value.
++        '''
++        LOG.debug(_("_set_arp_responder called"))
++
++        mac = netaddr.EUI(mac_str, dialect=netaddr.mac_unix)
++        ip = netaddr.IPAddress(ip_str)
++
++        if action == 'add':
++            actions = ('move:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[],'
++                       'mod_dl_src:%(mac)s,'
++                       'load:0x2->NXM_OF_ARP_OP[],'
++                       'move:NXM_NX_ARP_SHA[]->NXM_NX_ARP_THA[],'
++                       'move:NXM_OF_ARP_SPA[]->NXM_OF_ARP_TPA[],'
++                       'load:%(mac)#x->NXM_NX_ARP_SHA[],'
++                       'load:%(ip)#x->NXM_OF_ARP_SPA[],'
++                       'in_port' % {'mac': mac, 'ip': ip})
++            self.tun_br.add_flow(table=constants.ARP_RESPONDER,
++                                 priority=1,
++                                 proto='arp',
++                                 dl_vlan=lvid,
++                                 nw_dst='%s' % ip,
++                                 actions=actions)
++        else:
++            LOG.warning(_('Action %s not supported'), action)
++        LOG.debug(_("_set_arp_responder called over"))
++
++
++    def _set_arp_store(self, action, lvid, segid,  mac_str, ip_str, of_port):
++        '''
++	Update ARP Cache on BR-INT
++	'''
++	LOG.debug(_("_set_arp_store called"))
++        mac = netaddr.EUI(mac_str, dialect=netaddr.mac_unix)
++        ip = netaddr.IPAddress(ip_str)
++
++        if action == 'add':
++            self.int_br.add_flow(table=constants.LOCAL_ARP_STORE,
++                                 priority=1,
++                                 dl_type=0x0800,
++                                 vlan_tci="%s/0x0fff" % lvid,
++                                 nw_dst="%s" % ip_str,
++                                 actions="mod_dl_dst=%s, resubmit(,%s)" % ( mac_str, constants.UCAST_MCAST_CHECK))
++
++        else:
++            LOG.warning(_('Action %s not supported'), action)
++        LOG.debug(_("_set_arp_store called over"))
+ 
+     def _add_fdb_flow(self, port_info, agent_ip, lvm, ofport):
++        LOG.debug(_("_add_fdb_flow called"))
+         if port_info == q_const.FLOODING_ENTRY:
+             lvm.tun_ofports.add(ofport)
+             ofports = ','.join(lvm.tun_ofports)
+@@ -383,6 +948,8 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                                  actions="strip_vlan,set_tunnel:%s,"
+                                  "output:%s" % (lvm.segmentation_id, ofports))
+         else:
++            self._set_arp_responder('add', lvm.vlan, port_info[0], port_info[1])
++            self._set_arp_store('add',lvm.vlan, lvm.segmentation_id , port_info[0], port_info[1], ofport)
+             # TODO(feleouet): add ARP responder entry
+             self.tun_br.add_flow(table=constants.UCAST_TO_TUN,
+                                  priority=2,
+@@ -390,9 +957,11 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                                  dl_dst=port_info[0],
+                                  actions="strip_vlan,set_tunnel:%s,output:%s" %
+                                  (lvm.segmentation_id, ofport))
++        LOG.debug(_("_add_fdb_flow called over"))
+ 
+     def _del_fdb_flow(self, port_info, agent_ip, lvm, ofport):
+-        if port_info == q_const.FLOODING_ENTRY:
++        return
++	if port_info == q_const.FLOODING_ENTRY:
+             lvm.tun_ofports.remove(ofport)
+             if len(lvm.tun_ofports) > 0:
+                 ofports = ','.join(lvm.tun_ofports)
+@@ -415,13 +984,14 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                                      dl_dst=port_info[0])
+ 
+     def fdb_update(self, context, fdb_entries):
+-        LOG.debug(_("fdb_update received"))
++        LOG.debug(_("fdb_update called"))
+         for action, values in fdb_entries.items():
+             method = '_fdb_' + action
+             if not hasattr(self, method):
+                 raise NotImplementedError()
+ 
+             getattr(self, method)(context, values)
++        LOG.debug(_("fdb_update called over"))
+ 
+     def create_rpc_dispatcher(self):
+         '''Get the rpc dispatcher for this manager.
+@@ -441,6 +1011,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         :param physical_network: the physical network for 'vlan' or 'flat'
+         :param segmentation_id: the VID for 'vlan' or tunnel ID for 'tunnel'
+         '''
++        LOG.debug(_("provision_local_vlan called"))
+ 
+         if not self.available_local_vlans:
+             LOG.error(_("No local VLAN available for net-id=%s"), net_uuid)
+@@ -455,6 +1026,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+ 
+         if network_type in constants.TUNNEL_NETWORK_TYPES:
+             if self.enable_tunneling:
++                self.tun_br.defer_apply_on()
+                 # outbound broadcast/multicast
+                 ofports = ','.join(self.tun_br_ofports[network_type].values())
+                 if ofports:
+@@ -466,11 +1038,22 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                                          (segmentation_id, ofports))
+                 # inbound from tunnels: set lvid in the right table
+                 # and resubmit to Table LEARN_FROM_TUN for mac learning
+-                self.tun_br.add_flow(table=constants.TUN_TABLE[network_type],
+-                                     priority=1,
+-                                     tun_id=segmentation_id,
+-                                     actions="mod_vlan_vid:%s,resubmit(,%s)" %
+-                                     (lvid, constants.LEARN_FROM_TUN))
++	        
++		if self.local_ip != self.network_node_tunnel_ip:
++			self.tun_br.add_flow(table=constants.TUN_TABLE[network_type],
++                        	             priority=1,
++                                	     tun_id=segmentation_id,
++                                     	     actions="mod_vlan_vid:%s,resubmit(,%s)" %
++                                     	     (lvid, constants.LEARN_FROM_TUN))
++		else:
++			self.tun_br.add_flow(table=constants.TUN_TABLE[network_type],
++                                             priority=1,
++                                             tun_id=segmentation_id,
++                                             actions="mod_vlan_vid:%s,resubmit(,%s)" %
++                                             (lvid, constants.EXTERNAL_OR_OVERLAY_FROM_TUN))
++
++			
++                self.tun_br.defer_apply_off()
+             else:
+                 LOG.error(_("Cannot provision %(network_type)s network for "
+                           "net-id=%(net_uuid)s - tunneling disabled"),
+@@ -524,6 +1107,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                         "%(network_type)s for net-id=%(net_uuid)s"),
+                       {'network_type': network_type,
+                        'net_uuid': net_uuid})
++        LOG.debug(_("provision_local_vlan called over"))
+ 
+     def reclaim_local_vlan(self, net_uuid):
+         '''Reclaim a local VLAN.
+@@ -532,6 +1116,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         :param lvm: a LocalVLANMapping object that tracks (vlan, lsw_id,
+             vif_ids) mapping.
+         '''
++
+         lvm = self.local_vlan_map.pop(net_uuid, None)
+         if lvm is None:
+             LOG.debug(_("Network %s not used on agent."), net_uuid)
+@@ -547,10 +1132,12 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                     table=constants.TUN_TABLE[lvm.network_type],
+                     tun_id=lvm.segmentation_id)
+                 self.tun_br.delete_flows(dl_vlan=lvm.vlan)
+-                if self.l2_pop:
++                '''
++		if self.l2_pop:
+                     # Try to remove tunnel ports if not used by other networks
+                     for ofport in lvm.tun_ofports:
+                         self.cleanup_tunnel_port(ofport, lvm.network_type)
++		'''
+         elif lvm.network_type == constants.TYPE_FLAT:
+             if lvm.physical_network in self.phys_brs:
+                 # outbound
+@@ -595,6 +1182,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         :param physical_network: the physical network for 'vlan' or 'flat'
+         :param segmentation_id: the VID for 'vlan' or tunnel ID for 'tunnel'
+         '''
++        LOG.debug(_("port_bound called"))
+         if net_uuid not in self.local_vlan_map:
+             self.provision_local_vlan(net_uuid, network_type,
+                                       physical_network, segmentation_id)
+@@ -603,8 +1191,10 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+ 
+         self.int_br.set_db_attribute("Port", port.port_name, "tag",
+                                      str(lvm.vlan))
+-        if int(port.ofport) != -1:
+-            self.int_br.delete_flows(in_port=port.ofport)
++        #if int(port.ofport) != -1:
++        #    self.int_br.delete_flows(in_port=port.ofport)
++        LOG.debug(_("port_bound called over"))
++
+ 
+     def port_unbound(self, vif_id, net_uuid=None):
+         '''Unbind port.
+@@ -639,7 +1229,9 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         self.int_br.add_flow(priority=2, in_port=port.ofport, actions="drop")
+ 
+     def setup_integration_br(self):
+-        '''Setup the integration bridge.
++        LOG.debug(_("setup_integ_br called"))
++        # Assumed br-int already existant
++	'''Setup the integration bridge.
+ 
+         Create patch ports and remove all existing flows.
+ 
+@@ -649,7 +1241,91 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         self.int_br.delete_port(cfg.CONF.OVS.int_peer_patch_port)
+         self.int_br.remove_all_flows()
+         # switch all traffic using L2 learning
+-        self.int_br.add_flow(priority=1, actions="normal")
++        # self.int_br.add_flow(priority=1, actions="normal")
++        LOG.debug(_("setup_integ_br called over"))
++
++    def initialize_integ_br (self ):
++        # Table 0 (default) will sort incoming traffic depending on in_port
++        LOG.debug(_("initialize_integ_br called"))
++        
++        if self.enable_tunneling:
++                self.int_br.add_flow(table=0,
++                                     priority=1,
++                                     in_port=self.patch_tun_ofport,
++                                     actions="resubmit(,%s)" %
++                                     constants.LEARN_FROM_INT)
++        self.int_br.add_flow(table=0, priority=0, actions="drop")
++        # INT_TO_PATCH table will handle packets coming from various ports other than patch-tun port on Integration Bridge
++        self.int_br.add_flow(table=constants.INT_TO_PATCH, priority=0, actions="drop")
++
++        # UCAST_MCAST_CHECK decides if the packet is unicast then send it to LEARN_FROM_INT else to FLOOD_TO_INT for flooding
++        self.int_br.add_flow(table=constants.UCAST_MCAST_CHECK,
++                             dl_dst="00:00:00:00:00:00/01:00:00:00:00:00",
++                             actions="resubmit(,%s), resubmit(,%s)" % (constants.UCAST_TO_INT, constants.FLOOD_TO_INT))
++        
++        LOG.debug(_("UCAST_MCAST check flow being added"))
++        self.int_br.add_flow(table=constants.UCAST_MCAST_CHECK,
++                             dl_dst="01:00:00:00:00:00/01:00:00:00:00:00",
++                             actions="resubmit(,%s)" % constants.FLOOD_TO_INT)
++        # LEARN_FROM_TUN table will have a single flow using a learn action to
++        # dynamically set-up flows in UCAST_TO_INT corresponding to remote mac
++        # adresses
++        learned_flow = ("table=%s,"
++                        "priority=1,"
++                        "hard_timeout=100,"
++                        "NXM_OF_VLAN_TCI[0..11],"
++                        "NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],"
++                        "load:NXM_OF_IN_PORT[]->NXM_NX_REG0[0..15]"
++                        % constants.UCAST_TO_INT)
++        # Once remote mac adresses are learnt, packet is outputed to patch_int
++        LOG.debug(_("LEARN_FROM_INT flow being added"))
++        self.int_br.add_flow(table=constants.LEARN_FROM_INT,
++                             priority=1,
++                             actions="learn(%s), resubmit(,%s)" %
++                             (learned_flow, constants.PACKET_FROM_EXTERNAL))
++        # FLOOD_TO_INT will handle flooding in tunnels based on lvid,
++        # for now, add a default drop action
++        
++        self.int_br.add_flow(table=constants.PACKET_FROM_EXTERNAL,
++                             priority=0,
++                             actions="resubmit(,%s)" %
++                             (constants.DST_SUBNET_GW_MAC))
++
++        self.int_br.add_flow(table=constants.CHANGE_SOURCE_MAC_TO_INTERNAL,
++                             priority=0,
++                             actions="drop" )
++
++        
++	
++	if self.enable_tunneling:
++                self.int_br.add_flow(table=constants.FLOOD_TO_INT,
++                                     reg0="%s" % self.patch_tun_ofport,
++                                     actions="output:%s" 
++                                     % self.patch_tun_ofport )
++        
++        self.int_br.add_flow(table=constants.DST_SUBNET_GW_MAC,
++                             priority=10,
++                             dl_dst="01:00:00:00:00:00/01:00:00:00:00:00",
++			     actions="resubmit(,%s)" % constants.FLOOD_TO_INT)
++
++        self.int_br.add_flow(table=constants.DST_SUBNET_GW_MAC,
++                             priority=0,
++                             actions="resubmit(,%s)" % constants.UCAST_MCAST_CHECK)
++
++        self.int_br.add_flow(table=constants.ROUTING_TABLE_SRC,
++                             priority=0,
++                             actions="drop")
++
++        self.int_br.add_flow(table=constants.ROUTING_TABLE_DST,
++                             priority=0,
++                             actions="resubmit(,%s)" % constants.EXTERNAL_ROUTING)
++
++        self.int_br.add_flow(table=constants.EXTERNAL_ROUTING,
++                             priority=0,
++                             actions="drop")
++
++	LOG.debug(_("initialize_integ_br called over"))
++
+ 
+     def setup_ancillary_bridges(self, integ_br, tun_br):
+         '''Setup ancillary bridges - for example br-ex.'''
+@@ -677,6 +1353,42 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+             ancillary_bridges.append(br)
+         return ancillary_bridges
+ 
++    def setup_external_bridge ( self, ext_br ):
++	'''
++	Setup external bridge
++	'''
++        # Bridge already configured by user like in case of BR-EXT
++	self.external_br = ovs_lib.OVSBridge(ext_br, self.root_helper)		# This function just creates an object of class representing external bridge
++	# RIGHT NOW MANUALLY ADD UPLINK. We need to add SCRIPT in /etc/sysconfig/network-interfaces : ifcfg-<up_link_name>
++	# self.external_br.reset_bridge()					# This was the step that was actually creating new bridge and destroying the old
++
++	patch1_name = "patch-tunbr"
++	patch2_name = "patch-extbr"
++	self.patch_ext_ofport = self.tun_br.add_patch_port(
++            patch1_name, patch2_name)
++        self.patch_tun_ex_ofport = self.external_br.add_patch_port(
++            patch2_name, patch1_name)
++        if int(self.patch_tun_ex_ofport) < 0 or int(self.patch_ext_ofport) < 0:
++            LOG.error(_("Failed to create OVS patch port. Cannot have "
++                        "external bridge linking on the tunnel "
++                        "Agent terminated!"))
++            exit(1)
++
++        patch1_name = "patch-tunbr_egress"
++        patch2_name = "patch-extbr_ingress"
++        self.patch_ext_ofport_ingress = self.tun_br.add_patch_port(
++            patch1_name, patch2_name)
++        self.patch_tun_ex_ofport_egress = self.external_br.add_patch_port(
++            patch2_name, patch1_name)
++        if int(self.patch_tun_ex_ofport_egress) < 0 or int(self.patch_ext_ofport_ingress) < 0:
++            LOG.error(_("Failed to create OVS patch port. Cannot have "
++                        "external bridge linking on the tunnel "
++                        "Agent terminated!"))
++            exit(1)
++
++        self.external_br.remove_all_flows()
++
++
+     def setup_tunnel_br(self, tun_br):
+         '''Setup the tunnel bridge.
+ 
+@@ -707,51 +1419,227 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         self.tun_br.add_flow(priority=0, actions="drop")
+         # PATCH_LV_TO_TUN table will handle packets coming from patch_int
+         # unicasts go to table UCAST_TO_TUN where remote adresses are learnt
+-        self.tun_br.add_flow(table=constants.PATCH_LV_TO_TUN,
+-                             dl_dst="00:00:00:00:00:00/01:00:00:00:00:00",
+-                             actions="resubmit(,%s)" % constants.UCAST_TO_TUN)
++        
++	if self.local_ip != self.network_node_tunnel_ip:
++	        self.tun_br.add_flow(table=constants.PATCH_LV_TO_TUN,
++        	                     priority=0,
++				     dl_dst="00:00:00:00:00:00/01:00:00:00:00:00",
++                	             actions="resubmit(,%s)" % constants.UCAST_TO_TUN)
++	else:
++                self.tun_br.add_flow(table=constants.PATCH_LV_TO_TUN,
++                                     priority=0,
++				     dl_dst="00:00:00:00:00:00/01:00:00:00:00:00",
++                                     actions="resubmit(,%s)" % constants.EXTERNAL_OR_OVERLAY_FROM_INT)
++	
+         # Broadcasts/multicasts go to table FLOOD_TO_TUN that handles flooding
+-        self.tun_br.add_flow(table=constants.PATCH_LV_TO_TUN,
+-                             dl_dst="01:00:00:00:00:00/01:00:00:00:00:00",
++        
++	self.tun_br.add_flow(table=constants.PATCH_LV_TO_TUN,
++                             priority=0,
++			     dl_dst="01:00:00:00:00:00/01:00:00:00:00:00",
+                              actions="resubmit(,%s)" % constants.FLOOD_TO_TUN)
++
++        self.tun_br.add_flow(table=constants.PATCH_LV_TO_TUN,
++                             priority=1,
++			     dl_type=0x0806,
++			     nw_proto=1,			# ARP Request
++                             actions="resubmit(,%s)" % constants.ARP_RESPONDER)
++
++
++        self.tun_br.add_flow(table=constants.ARP_RESPONDER,
++                             priority=0,
++                             dl_type=0x0806,
++			     actions="resubmit(,%s)" % constants.FLOOD_TO_TUN)
++
++
+         # Tables [tunnel_type]_TUN_TO_LV will set lvid depending on tun_id
+         # for each tunnel type, and resubmit to table LEARN_FROM_TUN where
+         # remote mac adresses will be learnt
+-        for tunnel_type in constants.TUNNEL_NETWORK_TYPES:
++        
++	for tunnel_type in constants.TUNNEL_NETWORK_TYPES:
+             self.tun_br.add_flow(table=constants.TUN_TABLE[tunnel_type],
+                                  priority=0,
+                                  actions="drop")
++
++        if self.local_ip == self.network_node_tunnel_ip:
++        	self.tun_br.add_flow(table=constants.EXTERNAL_OR_OVERLAY_FROM_TUN,
++                                     priority=0,
++                                     actions="resubmit(,%s)" %
++                                     constants.LEARN_FROM_TUN)
++                self.tun_br.add_flow(table=constants.EXTERNAL_OR_OVERLAY_FROM_INT,
++                                     priority=0,
++                                     actions="resubmit(,%s)" %
++                                     constants.UCAST_TO_TUN)
++	
++
+         # LEARN_FROM_TUN table will have a single flow using a learn action to
+         # dynamically set-up flows in UCAST_TO_TUN corresponding to remote mac
+         # adresses (assumes that lvid has already been set by a previous flow)
+-        learned_flow = ("table=%s,"
++        learned_flow_ip = ("table=%s,"
+                         "priority=1,"
+-                        "hard_timeout=300,"
++                        "dl_type=0x0800,"
++                        "hard_timeout=100,"
+                         "NXM_OF_VLAN_TCI[0..11],"
+                         "NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],"
++                        "NXM_OF_IP_DST[]=NXM_OF_IP_SRC[],"
+                         "load:0->NXM_OF_VLAN_TCI[],"
+                         "load:NXM_NX_TUN_ID[]->NXM_NX_TUN_ID[],"
+                         "output:NXM_OF_IN_PORT[]" %
+                         constants.UCAST_TO_TUN)
++
++        learned_flow_arp = ("table=%s,"
++                        "priority=2,"
++                        "dl_type=0x0806,"
++                        "hard_timeout=100,"
++                        "NXM_OF_VLAN_TCI[0..11],"
++                        "NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],"
++                        "NXM_OF_ARP_TPA[]=NXM_OF_ARP_SPA[],"
++                        "load:0->NXM_OF_VLAN_TCI[],"
++                        "load:NXM_NX_TUN_ID[]->NXM_NX_TUN_ID[],"
++                        "output:NXM_OF_IN_PORT[]" %
++                        constants.UCAST_TO_TUN)
++
+         # Once remote mac adresses are learnt, packet is outputed to patch_int
+         self.tun_br.add_flow(table=constants.LEARN_FROM_TUN,
+                              priority=1,
++                             dl_type=0x0800,
++                             actions="learn(%s),output:%s" %
++                             (learned_flow_ip, self.patch_int_ofport))
++        self.tun_br.add_flow(table=constants.LEARN_FROM_TUN,
++                             priority=1,
++                             dl_type=0x0806,
+                              actions="learn(%s),output:%s" %
+-                             (learned_flow, self.patch_int_ofport))
++                             (learned_flow_arp, self.patch_int_ofport))
++
+         # Egress unicast will be handled in table UCAST_TO_TUN, where remote
+         # mac adresses will be learned. For now, just add a default flow that
+         # will resubmit unknown unicasts to table FLOOD_TO_TUN to treat them
+         # as broadcasts/multicasts
+-        self.tun_br.add_flow(table=constants.UCAST_TO_TUN,
+-                             priority=0,
+-                             actions="resubmit(,%s)" %
+-                             constants.FLOOD_TO_TUN)
++
++        if self.local_ip != self.network_node_tunnel_ip:
++                # For compute nodes we use table EXTERNAL_ROUTING_TUN
++                self.tun_br.add_flow(table=constants.UCAST_TO_TUN,
++                                     priority=0,
++                                     actions="resubmit(,%s)" %
++                                     constants.EXTERNAL_ROUTING_TUN)
++
++                self.tun_br.add_flow(table=constants.EXTERNAL_ROUTING_TUN,
++                                     priority=0,
++                                     actions="resubmit(,%s)" %
++                                     constants.FLOOD_TO_TUN)
++        else:
++                # For network/controller node the table / flow changed
++                self.tun_br.add_flow(table=constants.UCAST_TO_TUN,
++                                     priority=0,
++                                     actions="resubmit(,%s)" %
++                                     constants.FLOOD_TO_TUN)
++
++
+         # FLOOD_TO_TUN will handle flooding in tunnels based on lvid,
+         # for now, add a default drop action
+         self.tun_br.add_flow(table=constants.FLOOD_TO_TUN,
+                              priority=0,
+                              actions="drop")
+ 
++    def initialize_tun_ext_link(self):
++	self.up_link_ofport = self.external_br.add_port(self.eth_if)
++	# Assume that config file is already configured
++	learned_flow_ip = ( "table=%s,"
++			    "priority=1,"
++                            "hard_timeout=100,"
++			    "NXM_OF_VLAN_TCI[0..11],"
++			    "NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],"
++			    "dl_type=0x800,"
++			    "NXM_OF_IP_DST[]=NXM_OF_IP_SRC[],"
++			    "load:0->NXM_OF_VLAN_TCI[],"
++			    "load:NXM_NX_TUN_ID[]->NXM_NX_TUN_ID[],"
++			    "output:NXM_OF_IN_PORT[]" % constants.UCAST_FROM_EXTERNAL )
++
++	self.tun_br.add_flow(table=constants.EXTERNAL_LEARN_FROM_TUN,
++			     priority=1,
++			     dl_type=0x0800,
++			     actions="learn(%s), output:%s" % 
++			     ( learned_flow_ip, self.patch_ext_ofport) )
++	learned_flow_arp = ( "table=%s,"
++			     "priority=1,"
++                             "hard_timeout=100,"
++			     "NXM_OF_VLAN_TCI[0..11],"
++			     "NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],"
++			     "dl_type=0x806,"
++			     "NXM_OF_ARP_TPA[]=NXM_OF_ARP_SPA[],"
++		  	     "load:0->NXM_OF_VLAN_TCI[],"
++			     "load:NXM_NX_TUN_ID[]->NXM_NX_TUN_ID[],"
++			     "output:NXM_OF_IN_PORT[]" % constants.UCAST_FROM_EXTERNAL )
++
++	self.tun_br.add_flow(table=constants.EXTERNAL_LEARN_FROM_TUN,
++		   	     priority=1,
++			     dl_type=0x0806,
++			     actions="learn(%s), output:%s" % 
++			     ( learned_flow_arp, self.patch_ext_ofport) )	
++
++	learned_flow_ip = ( "table=%s,"
++		   	    "priority=1,"
++                            "hard_timeout=100,"
++			    "NXM_OF_VLAN_TCI[0..11],"
++			    "NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],"
++			    "dl_type=0x800,"
++			    "NXM_OF_IP_DST[]=NXM_OF_IP_SRC[],"
++			    "output:NXM_OF_IN_PORT[]" % constants.UCAST_FROM_EXTERNAL )
++
++	self.tun_br.add_flow(table=constants.EXTERNAL_LEARN_FROM_INT,
++		 	     priority=1,
++			     dl_type=0x0800,
++			     actions="learn(%s), output:%s" % 
++			     ( learned_flow_ip, self.patch_ext_ofport)) 
++
++	learned_flow_arp = ( "table=%s,"
++			     "priority=1,"
++                             "hard_timeout=100,"
++			     "NXM_OF_VLAN_TCI[0..11],"
++			     "NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],"
++			     "dl_type=0x806,"
++			     "NXM_OF_ARP_TPA[]=NXM_OF_ARP_SPA[],"
++			     "output:NXM_OF_IN_PORT[]" % constants.UCAST_FROM_EXTERNAL )
++	
++	self.tun_br.add_flow(table=constants.EXTERNAL_LEARN_FROM_INT,
++			     priority=1,
++	 		     dl_type=0x0806,
++		     	     actions="learn(%s), output:%s" % 
++		     	     ( learned_flow_arp, self.patch_ext_ofport))
++
++	self.external_br.add_flow( priority=0,
++				   actions="NORMAL")
++
++        self.external_br.add_flow( priority=2,
++                                   dl_type=0x0800,
++				   nw_proto=1,
++				   actions="drop")			# Currently we dont support ping to external network
++
++        self.external_br.add_flow( priority=1,
++                                   in_port="%s" % self.patch_tun_ex_ofport,
++				   actions="load:%s->NXM_NX_REG0[],resubmit(,%s)" % (self.patch_tun_ex_ofport_egress, constants.SNAT_DNAT_DECISION))
++
++	self.external_br.add_flow( priority=1,
++                                   in_port="%s" % self.up_link_ofport,
++                                   actions="resubmit(,%s)" % constants.UPLINK_TO_EXT)
++
++        self.external_br.add_flow( table=constants.SNAT_DNAT_DECISION,
++				   priority=0,
++                                   actions="drop") 
++
++        self.external_br.add_flow( table=constants.UPLINK_TO_EXT,
++				   priority=0,
++                                   actions="NORMAL")
++
++
++        self.external_br.add_flow( table=constants.ARP_RESPONDER_EXTERNAL,
++                                   priority=0,
++                                   actions="NORMAL")
++
++        self.external_br.add_flow( table=constants.ROUTING_AMONGST_VIRTUAL_ROUTERS,
++                                   priority=0,
++                                   actions="strip_vlan, resubmit(,%s)" % constants.EXTERNAL_NETWORK_ARP_CACHE)
++	
++
+     def setup_physical_bridges(self, bridge_mappings):
+         '''Setup the physical network bridges.
+ 
+@@ -816,6 +1704,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                 phys_veth.link.set_mtu(self.veth_mtu)
+ 
+     def update_ports(self, registered_ports):
++        LOG.debug(_("update_ports called"))
+         ports = self.int_br.get_vif_port_set()
+         if ports == registered_ports:
+             return
+@@ -825,6 +1714,8 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         return {'current': ports,
+                 'added': added,
+                 'removed': removed}
++        LOG.debug(_("update_ports called over"))
++
+ 
+     def update_ancillary_ports(self, registered_ports):
+         ports = set()
+@@ -841,6 +1732,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+ 
+     def treat_vif_port(self, vif_port, port_id, network_id, network_type,
+                        physical_network, segmentation_id, admin_state_up):
++        LOG.debug(_("treat_vif_port called"))
+         if vif_port:
+             if admin_state_up:
+                 self.port_bound(vif_port, network_id, network_type,
+@@ -849,6 +1741,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                 self.port_dead(vif_port)
+         else:
+             LOG.debug(_("No VIF port for port %s defined on agent."), port_id)
++        LOG.debug(_("treat_vif_ports called over"))
+ 
+     def setup_tunnel_port(self, port_name, remote_ip, tunnel_type):
+         ofport = self.tun_br.add_tunnel_port(port_name,
+@@ -897,6 +1790,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                     self.tun_br_ofports[tunnel_type].pop(remote_ip, None)
+ 
+     def treat_devices_added(self, devices):
++        LOG.debug(_("treat_devices_added called"))
+         resync = False
+         self.sg_agent.prepare_devices_filter(devices)
+         for device in devices:
+@@ -931,9 +1825,11 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                 LOG.debug(_("Device %s not defined on plugin"), device)
+                 if (port and int(port.ofport) != -1):
+                     self.port_dead(port)
++        LOG.debug(_("treat_devices_added called over"))
+         return resync
+ 
+     def treat_ancillary_devices_added(self, devices):
++        LOG.debug(_("treat_ancillary_devices_added called"))
+         resync = False
+         for device in devices:
+             LOG.info(_("Ancillary Port %s added"), device)
+@@ -953,6 +1849,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                                              self.agent_id,
+                                              cfg.CONF.host)
+         return resync
++        LOG.debug(_("treat_ancillary_devices_added called over"))
+ 
+     def treat_devices_removed(self, devices):
+         resync = False
+@@ -994,6 +1891,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         return resync
+ 
+     def process_network_ports(self, port_info):
++        LOG.debug(_("process_network_ports called"))
+         resync_a = False
+         resync_b = False
+         if 'added' in port_info:
+@@ -1001,6 +1899,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+         if 'removed' in port_info:
+             resync_b = self.treat_devices_removed(port_info['removed'])
+         # If one of the above opertaions fails => resync with plugin
++        LOG.debug(_("process_network_ports called over"))
+         return (resync_a | resync_b)
+ 
+     def process_ancillary_network_ports(self, port_info):
+@@ -1021,7 +1920,9 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                 details = self.plugin_rpc.tunnel_sync(self.context,
+                                                       self.local_ip,
+                                                       tunnel_type)
+-                if not self.l2_pop:
++                LOG.debug(_("tunnel_sync details: %s"),details)
++                '''
++		if not self.l2_pop:
+                     tunnels = details['tunnels']
+                     for tunnel in tunnels:
+                         if self.local_ip != tunnel['ip_address']:
+@@ -1030,6 +1931,19 @@ class OVSNeutronAgent(sg_rpc.SecurityGro
+                             self.setup_tunnel_port(tun_name,
+                                                    tunnel['ip_address'],
+                                                    tunnel_type)
++
++                '''
++		tunnels = details['tunnels']
++                #tunnels.append( {'ip_address': '192.168.122.158', 'udp_port': 4789})
++		for tunnel in tunnels:
++                    if self.local_ip != tunnel['ip_address']:
++                        tunnel_id = tunnel.get('id', tunnel['ip_address'])
++                        tun_name = '%s-%s' % (tunnel_type, tunnel_id)
++                        self.setup_tunnel_port(tun_name,
++                                               tunnel['ip_address'],
++                                               tunnel_type)
++
++
+         except Exception as e:
+             LOG.debug(_("Unable to sync tunnel IP %(local_ip)s: %(e)s"),
+                       {'local_ip': self.local_ip, 'e': e})
+@@ -1151,7 +2065,13 @@ def create_agent_config_map(config):
+         tunnel_types=config.AGENT.tunnel_types,
+         veth_mtu=config.AGENT.veth_mtu,
+         l2_population=config.AGENT.l2_population,
++        ext_br=config.OVS.external_bridge,
++        network_node_tunnel_ip=config.OVS.network_node_tunnel_ip,
++	ext_if=config.OVS.external_interface,
+     )
++    LOG.debug(_("INIPARSER- %s"), config.OVS.external_bridge)
++    LOG.debug(_("INIPARSER- %s"), config.OVS.network_node_tunnel_ip)
++    LOG.debug(_("INIPARSER- %s"), config.OVS.external_interface)
+ 
+     # If enable_tunneling is TRUE, set tunnel_type to default to GRE
+     if config.OVS.enable_tunneling and not kwargs['tunnel_types']:
+diff -rupN old/neutron/plugins/openvswitch/common/config.py new/neutron/plugins/openvswitch/common/config.py
+--- old/neutron/plugins/openvswitch/common/config.py	2014-10-31 13:06:09.000000000 +0530
++++ new/neutron/plugins/openvswitch/common/config.py	2014-10-31 13:06:09.000000000 +0530
+@@ -56,6 +56,14 @@ ovs_opts = [
+     cfg.StrOpt('tunnel_type', default='',
+                help=_("The type of tunnels to use when utilizing tunnels, "
+                       "either 'gre' or 'vxlan'")),
++
++    cfg.StrOpt('external_bridge', default='br-ex',
++               help=_("External bridge to use")),
++    cfg.StrOpt('network_node_tunnel_ip', default='',
++               help=_("Tunnel IP of network node")),
++    cfg.StrOpt('external_interface', default='eth0',
++               help=_("External network up-link for external bridge")),
++
+ ]
+ 
+ agent_opts = [
+diff -rupN old/neutron/plugins/openvswitch/common/constants.py new/neutron/plugins/openvswitch/common/constants.py
+--- old/neutron/plugins/openvswitch/common/constants.py	2014-10-31 13:06:09.000000000 +0530
++++ new/neutron/plugins/openvswitch/common/constants.py	2014-10-31 13:06:09.000000000 +0530
+@@ -43,8 +43,40 @@ TUNNEL_NETWORK_TYPES = [TYPE_GRE, TYPE_V
+ PATCH_LV_TO_TUN = 1
+ GRE_TUN_TO_LV = 2
+ VXLAN_TUN_TO_LV = 3
+-LEARN_FROM_TUN = 10
+-UCAST_TO_TUN = 20
+-FLOOD_TO_TUN = 21
++LEARN_FROM_TUN = 50
++EXTERNAL_LEARN_FROM_TUN = 51
++EXTERNAL_LEARN_FROM_INT = 52
++UCAST_TO_TUN = 60
++UCAST_FROM_EXTERNAL = 61
++FLOOD_TO_TUN = 22
+ # Map tunnel types to tables number
+ TUN_TABLE = {TYPE_GRE: GRE_TUN_TO_LV, TYPE_VXLAN: VXLAN_TUN_TO_LV}
++ARP_RESPONDER=21
++ARP_STORE=23
++EXTERNAL_ROUTING_TUN = 25
++FLOOD_TO_CONTROLLER = 31
++EXTERNAL_OR_OVERLAY_FROM_INT = 12
++EXTERNAL_OR_OVERLAY_FROM_TUN = 11
++
++INT_TO_PATCH = 1
++LEARN_FROM_INT = 10
++UCAST_MCAST_CHECK = 2
++UCAST_TO_INT = 20
++FLOOD_TO_INT = 21
++LOCAL_ARP_STORE=40
++DST_SUBNET_GW_MAC = 3
++ROUTING_TABLE_SRC = 30
++ROUTING_TABLE_DST = 35
++EXTERNAL_ROUTING = 50
++PACKET_FROM_EXTERNAL = 4
++CHANGE_SOURCE_MAC_TO_INTERNAL = 5
++
++
++# EXT bridge
++SNAT_DNAT_DECISION = 30
++ROUTING_EXTERNAL_NETWORK = 31
++EXTERNAL_NETWORK_ARP_CACHE = 20
++LEARN_EXTERNAL_SESSION = 40
++UPLINK_TO_EXT = 50
++ARP_RESPONDER_EXTERNAL=21
++ROUTING_AMONGST_VIRTUAL_ROUTERS = 13

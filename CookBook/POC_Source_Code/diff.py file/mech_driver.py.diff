@@ -1,0 +1,105 @@
+--- ./neutron/plugins/ml2/drivers/l2pop/mech_driver.py	2014-10-31 13:06:09.000000000 +0530
++++ ./neutron_poc/plugins/ml2/drivers/l2pop/mech_driver.py	2014-10-31 13:06:09.000000000 +0530
+@@ -91,6 +91,7 @@
+     def update_port_postcommit(self, context):
+         port = context.current
+         orig = context.original
++        LOG.debug(_("update_port_postcommit called context: %s"), context)
+ 
+         if port['status'] == orig['status']:
+             self._fixed_ips_changed(context, orig, port)
+@@ -100,6 +101,8 @@
+             fdb_entries = self._update_port_down(context)
+             l2pop_rpc.L2populationAgentNotify.remove_fdb_entries(
+                 self.rpc_ctx, fdb_entries)
++        LOG.debug(_("update_port_postcommit called over"))
++
+ 
+     def _get_port_infos(self, context, port):
+         agent_host = port['binding:host_id']
+@@ -132,8 +135,24 @@
+ 
+         return agent, agent_ip, segment, fdb_entries
+ 
++    def _get_physical_network_context_detail ( self, network_segment_context ):
++	return network_segment_context['provider:physical_network']
++
++    def _get_port_subnet_entries ( self, port ):
++         return [ip['subnet_id'] for ip in port['fixed_ips']]
++
+     def _update_port_up(self, context):
+-        port_context = context.current
++        LOG.debug(_("Context for Port Up update %s"),context)
++        LOG.debug(_("Current Context for Port Up update %s"),context.current)
++        LOG.debug(_("Network Context for Port Up update %s"),context.network)
++        LOG.debug(_("Network Context Object representation in detail %s"),context.network.current)
++	LOG.debug(_("Network Context Object representation in detail %s"),context.network.network_segments)
++	LOG.debug(_("Network Context Object representation in detail %s"),context.network.original)
++        network_segment_context=context.network.current
++	is_external=context.network.current['router:external']
++	phys_net= self._get_physical_network_context_detail(network_segment_context)
++        LOG.debug(_("Physical Network %s"), phys_net)
++	port_context = context.current
+         port_infos = self._get_port_infos(context, port_context)
+         if not port_infos:
+             return
+@@ -142,13 +161,39 @@
+         agent_host = port_context['binding:host_id']
+         network_id = port_context['network_id']
+ 
++	subnet_id = self._get_port_subnet_entries(port_context)
++	port_uid= context.current['id']
++	device_owner= port_context['device_owner']
++	device_id= port_context['device_id']
++        LOG.debug(_("New Port Context entries %s"), port_uid)
++        LOG.debug(_("New Port Context entries %s"), device_id)
++        LOG.debug(_("New Port Context entries %s"), device_owner)
++	for val in subnet_id:
++		LOG.debug(_("New Port Context entries %s"), val)
++
++
++
+         session = db_api.get_session()
+         agent_ports = self.get_agent_network_port_count(session, agent_host,
+                                                         network_id)
+-
++        
++	subnet_cidr=[]
++	for val in subnet_id:
++		subnet_query = self.get_subnet_address(session, val)
++	        subnet_cidr.append(subnet_query['cidr'])
++		LOG.debug(_("Subnet Query result %s"), subnet_query)
++        for val in subnet_cidr:
++                LOG.debug(_("Subnet CIDR list %s"), val)
++	
+         other_fdb_entries = {network_id:
+-                             {'segment_id': segment['segmentation_id'],
++                             {'port_id' : port_uid,
++			      'device_owner' : device_owner,
++			      'device_id' : device_id,
++			      'subnet_cidr' : subnet_cidr,
++			      'physical_network' : phys_net,
++			      'segment_id': segment['segmentation_id'],
+                               'network_type': segment['network_type'],
++			      'router:external': is_external,
+                               'ports': {agent_ip: []}}}
+ 
+         if agent_ports == 1 or (
+@@ -156,13 +201,16 @@
+             # First port plugged on current agent in this network,
+             # we have to provide it with the whole list of fdb entries
+             agent_fdb_entries = {network_id:
+-                                 {'segment_id': segment['segmentation_id'],
++                                 {'physical_network' : phys_net,
++				  'segment_id': segment['segmentation_id'],
+                                   'network_type': segment['network_type'],
++				  'router:external' : is_external,
+                                   'ports': {}}}
+             ports = agent_fdb_entries[network_id]['ports']
+ 
+             network_ports = self.get_network_ports(session, network_id)
+             for network_port in network_ports:
++	        LOG.debug(_("Network Query Result in detail: %s"), network_port)
+                 binding, agent = network_port
+                 if agent.host == agent_host:
+                     continue

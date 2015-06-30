@@ -1,0 +1,92 @@
+--- ./neutron/agent/linux/ovs_lib.py	2014-10-31 13:06:09.000000000 +0530
++++ ./neutron_poc/agent/linux/ovs_lib.py	2014-10-31 13:06:09.000000000 +0530
+@@ -20,6 +20,9 @@
+ 
+ import re
+ 
++import os
++import commands
++
+ from neutron.agent.linux import ip_lib
+ from neutron.agent.linux import utils
+ from neutron.openstack.common import jsonutils
+@@ -137,15 +140,28 @@
+                    kwargs['dl_type'] or '')
+         dl_vlan = ('dl_vlan' in kwargs and ",dl_vlan=%s" %
+                    kwargs['dl_vlan'] or '')
+-        dl_src = 'dl_src' in kwargs and ",dl_src=%s" % kwargs['dl_src'] or ''
++
++        vlan_tci= ('vlan_tci' in kwargs and ",vlan_tci=%s" %
++                   kwargs['vlan_tci'] or '')
++
++	dl_src = 'dl_src' in kwargs and ",dl_src=%s" % kwargs['dl_src'] or ''
+         dl_dst = 'dl_dst' in kwargs and ",dl_dst=%s" % kwargs['dl_dst'] or ''
+         nw_src = 'nw_src' in kwargs and ",nw_src=%s" % kwargs['nw_src'] or ''
+         nw_dst = 'nw_dst' in kwargs and ",nw_dst=%s" % kwargs['nw_dst'] or ''
+         tun_id = 'tun_id' in kwargs and ",tun_id=%s" % kwargs['tun_id'] or ''
++        # Add support for NXM_NX_REG0[], REG1[], REG2[]
++	reg0 = 'reg0' in kwargs and ",reg0=%s" % kwargs['reg0'] or ''
++        reg1 = 'reg1' in kwargs and ",reg1=%s" % kwargs['reg1'] or ''
++        reg2 = 'reg2' in kwargs and ",reg2=%s" % kwargs['reg2'] or ''
++
+         proto = 'proto' in kwargs and ",%s" % kwargs['proto'] or ''
++        
++        nw_proto = 'nw_proto' in kwargs and ",nw_proto=%s" % kwargs['nw_proto'] or ''
++	
++	tun_id = 'tun_id' in kwargs and ",tun_id=%s" % kwargs['tun_id'] or ''
+         ip = ('nw_src' in kwargs or 'nw_dst' in kwargs) and ',ip' or ''
+-        match = (table + in_port + dl_type + dl_vlan + dl_src + dl_dst +
+-                (proto or ip) + nw_src + nw_dst + tun_id)
++        match = (table + in_port + dl_type + dl_vlan + vlan_tci + reg0 + reg1 + reg2 + dl_src + dl_dst +
++                (proto or ip ) + nw_proto + nw_src + nw_dst + tun_id)
+         if match:
+             match = match[1:]  # strip leading comma
+             flow_expr_arr.append(match)
+@@ -157,17 +173,28 @@
+         if "priority" not in kwargs:
+             kwargs["priority"] = "0"
+ 
++        LOG.debug(_('add_or_mod_flow_str received %s'),kwargs)
+         flow_expr_arr = self._build_flow_expr_arr(**kwargs)
++        LOG.debug(_('flow_expr_arr  %s'),flow_expr_arr)
+         flow_expr_arr.append("actions=%s" % (kwargs["actions"]))
+         flow_str = ",".join(flow_expr_arr)
+         return flow_str
+ 
+     def add_flow(self, **kwargs):
++        LOG.debug(_('add_flow received %s'),kwargs)
+         flow_str = self.add_or_mod_flow_str(**kwargs)
+-        if self.defer_apply_flows:
+-            self.deferred_flows['add'] += flow_str + '\n'
++        '''
++	if self.defer_apply_flows:
++            LOG.debug(_("Defer apply executed not ofctl run"))
++	    self.deferred_flows['add'] += flow_str + '\n'
+         else:
+-            self.run_ofctl("add-flow", [flow_str])
++            LOG.debug(_("Running ofctl command"))
++	    self.run_ofctl("add-flow", [flow_str])
++	'''
++        # remove deffered flows concept. Not handled by POC currently. Directly add flow on call
++	LOG.debug(_("Running ofctl command"))
++        self.run_ofctl("add-flow", [flow_str])
++
+ 
+     def mod_flow(self, **kwargs):
+         flow_str = self.add_or_mod_flow_str(**kwargs)
+@@ -185,6 +212,7 @@
+         if self.defer_apply_flows:
+             self.deferred_flows['del'] += flow_str + '\n'
+         else:
++
+             self.run_ofctl("del-flows", [flow_str])
+ 
+     def defer_apply_on(self):
+@@ -335,6 +363,7 @@
+             LOG.info(_("Unable to parse regex results. Exception: %s"), e)
+             return
+ 
++    
+     def delete_ports(self, all_ports=False):
+         if all_ports:
+             port_names = self.get_port_name_list()

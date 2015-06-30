@@ -1,0 +1,13 @@
+--- ./neutron/plugins/ml2/drivers/l2pop/db.py	2014-10-31 13:06:09.000000000 +0530
++++ ./neutron_poc/plugins/ml2/drivers/l2pop/db.py	2014-10-31 13:06:09.000000000 +0530
+@@ -75,3 +75,10 @@
+             query = query.filter(models_v2.Port.network_id == network_id,
+                                  ml2_models.PortBinding.host == agent_host)
+             return query.count()
++
++    def get_subnet_address(self, session, subnet_id):
++        with session.begin(subtransactions=True):
++            query = session.query(models_v2.Subnet)
++            query = query.filter(models_v2.Subnet.id == subnet_id)
++            return query.first()
++
